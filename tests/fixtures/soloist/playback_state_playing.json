@@ -1,0 +1,100 @@
+{
+  "type": "playback_state",
+  "status": "playing",
+  "item": {
+    "uri": "spotify:track:6Lto2Xj8y0U2bes2hmRMZu",
+    "entity_type": "track",
+    "decorations": {
+      "identity": {
+        "name": "Wonderful Nothing"
+      },
+      "visual_identity": {
+        "cover": [
+          {
+            "url": "https://i.scdn.co/image/ab67616d000048516dfbd2654e5c961d1126ad9c",
+            "size": "small"
+          },
+          {
+            "url": "https://i.scdn.co/image/ab67616d00001e026dfbd2654e5c961d1126ad9c",
+            "size": "default"
+          },
+          {
+            "url": "https://i.scdn.co/image/ab67616d0000b2736dfbd2654e5c961d1126ad9c",
+            "size": "large"
+          },
+          {
+            "url": "https://i.scdn.co/image/ab67616d0000b2736dfbd2654e5c961d1126ad9c",
+            "size": "xlarge"
+          }
+        ]
+      },
+      "parent": {
+        "entity": {
+          "uri": "spotify:album:5i6LJyHq9wxLSecf0N2Iuw",
+          "entity_type": "album",
+          "decorations": {
+            "identity": {
+              "name": "I Love You So F***ing Much"
+            }
+          }
+        }
+      },
+      "creators": [
+        {
+          "entity": {
+            "uri": "spotify:artist:4yvcSjfu4PC0CYQyLy4wSq",
+            "entity_type": "artist",
+            "decorations": {
+              "identity": {
+                "name": "Glass Animals"
+              }
+            }
+          }
+        }
+      ],
+      "playback": {
+        "duration_ms": 264214,
+        "content_ratings": []
+      }
+    }
+  },
+  "context": {
+    "uri": "spotify:list:popular-release-segments-main-roles:artist_4yvcSjfu4PC0CYQyLy4wSq",
+    "entity_type": "unknown",
+    "decorations": {
+      "identity": {
+        "name": "Glass Animals Popular"
+      }
+    }
+  },
+  "position": {
+    "position_ms": 34772,
+    "timestamp_ms": 1793864513250,
+    "speed": 1
+  },
+  "volume": 100,
+  "is_active": true,
+  "options": {
+    "shuffle": false,
+    "repeat": "off",
+    "playback_speed": 1,
+    "modes": {
+      "context_enhancement": "NONE"
+    }
+  },
+  "available_actions": {
+    "add_to_queue": {},
+    "pause": {},
+    "seek": {},
+    "seek_backward": {
+      "step_ms": 15000
+    },
+    "seek_forward": {
+      "step_ms": 15000
+    },
+    "set_repeat": {},
+    "shuffle": {},
+    "skip_next": {},
+    "skip_prev": {}
+  }
+}

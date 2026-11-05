@@ -26,6 +26,8 @@ pub enum Playback {
 pub enum PlayerEvent {
     Connected,
     Disconnected,
+    /// The name the daemon shows in Spotify's device list.
+    DeviceName(String),
     DeviceActive(bool),
     TrackChanged(Option<Track>),
     PlaybackChanged(Playback),
@@ -54,6 +56,8 @@ pub struct NowPlaying {
     pub playback: Playback,
     pub volume: u8,
     pub connected: bool,
+    /// Shown on the idle screen ("pick <device name> in Spotify"); `None` until the daemon says.
+    pub device_name: Option<String>,
     anchor_ms: u64,
     anchor_at: Option<Instant>,
 }
@@ -75,6 +79,7 @@ impl NowPlaying {
                 self.freeze(now);
                 self.connected = false;
             }
+            PlayerEvent::DeviceName(name) => self.device_name = Some(name),
             PlayerEvent::DeviceActive(true) => {}
             PlayerEvent::DeviceActive(false) | PlayerEvent::TrackChanged(None) => {
                 self.clear_track()
@@ -447,6 +452,21 @@ mod tests {
             "no jump for the time spent disconnected"
         );
         assert_eq!(np.position_ms(t2 + ms(1_000)), 13_000);
+    }
+
+    #[test]
+    fn device_name_is_kept() {
+        let t0 = Instant::now();
+        let mut np = NowPlaying::default();
+        assert_eq!(np.device_name, None);
+        np.apply(PlayerEvent::DeviceName("HTPC".to_owned()), t0, UNIX_NOW);
+        assert_eq!(np.device_name.as_deref(), Some("HTPC"));
+        np.apply(PlayerEvent::DeviceActive(false), t0, UNIX_NOW);
+        assert_eq!(
+            np.device_name.as_deref(),
+            Some("HTPC"),
+            "survives going idle"
+        );
     }
 
     #[test]

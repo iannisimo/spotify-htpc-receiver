@@ -1,0 +1,46 @@
+{
+  "type": "track_changed",
+  "item": {
+    "uri": "spotify:episode:5MsJ1bX913EBgzzXZjgGTW",
+    "entity_type": "episode",
+    "decorations": {
+      "identity": {
+        "name": "Midterm USA e la sfida di Abdul El-Sayed,  ancora violenza digitale su Telegram e gli allarmi bomba in Europa"
+      },
+      "visual_identity": {
+        "cover": [
+          {
+            "url": "https://i.scdn.co/image/ab6765630000f68dcbd71c655da56b08711ed39c",
+            "size": "small"
+          },
+          {
+            "url": "https://i.scdn.co/image/ab67656300005f1fcbd71c655da56b08711ed39c",
+            "size": "default"
+          },
+          {
+            "url": "https://i.scdn.co/image/ab6765630000ba8acbd71c655da56b08711ed39c",
+            "size": "large"
+          },
+          {
+            "url": "https://i.scdn.co/image/ab6765630000ba8acbd71c655da56b08711ed39c",
+            "size": "xlarge"
+          }
+        ]
+      },
+      "parent": {
+        "entity": {
+          "entity_type": "",
+          "decorations": {
+            "identity": {
+              "name": "The Essential"
+            }
+          }
+        }
+      },
+      "playback": {
+        "duration_ms": 659000,
+        "content_ratings": []
+      }
+    }
+  }
+}

@@ -1,0 +1,60 @@
+{
+  "type": "track_changed",
+  "item": {
+    "uri": "spotify:track:40rOlDoGejXXF4B0BYsjx8",
+    "entity_type": "track",
+    "decorations": {
+      "identity": {
+        "name": "Tangerine"
+      },
+      "visual_identity": {
+        "cover": [
+          {
+            "url": "https://i.scdn.co/image/ab67616d00004851712701c5e263efc8726b1464",
+            "size": "small"
+          },
+          {
+            "url": "https://i.scdn.co/image/ab67616d00001e02712701c5e263efc8726b1464",
+            "size": "default"
+          },
+          {
+            "url": "https://i.scdn.co/image/ab67616d0000b273712701c5e263efc8726b1464",
+            "size": "large"
+          },
+          {
+            "url": "https://i.scdn.co/image/ab67616d0000b273712701c5e263efc8726b1464",
+            "size": "xlarge"
+          }
+        ]
+      },
+      "parent": {
+        "entity": {
+          "uri": "spotify:album:5bfpRtBW7RNRdsm3tRyl3R",
+          "entity_type": "album",
+          "decorations": {
+            "identity": {
+              "name": "Dreamland"
+            }
+          }
+        }
+      },
+      "creators": [
+        {
+          "entity": {
+            "uri": "spotify:artist:4yvcSjfu4PC0CYQyLy4wSq",
+            "entity_type": "artist",
+            "decorations": {
+              "identity": {
+                "name": "Glass Animals"
+              }
+            }
+          }
+        }
+      ],
+      "playback": {
+        "duration_ms": 200583,
+        "content_ratings": []
+      }
+    }
+  }
+}
