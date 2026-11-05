@@ -1,0 +1,5 @@
+[keys]
+KP_Enter = "back"
+XF86AudioPlay = "OK"
+Escape = "none"
+F12 = "launch_missiles"

@@ -1,0 +1,15 @@
+volume_step = 99
+
+[daemon]
+address = "no-port-here"
+
+[visualizer]
+preset_duration_s = nan
+soft_cut_s = -3.0
+mesh_width = 1
+mesh_height = 100000
+fps_cap = 2
+min_scale = 4.0
+min_fps = 500
+beat_sensitivity = -1.0
+delay_ms = 999999

@@ -1,0 +1,13 @@
+audio_controls = true
+colour_scheme = "dark"
+
+[daemon]
+address = "127.0.0.1:9191"
+api_token = "secret"
+
+[visualizer]
+fps_cap = 30
+bloom = true
+
+[lyrics]
+enabled = true

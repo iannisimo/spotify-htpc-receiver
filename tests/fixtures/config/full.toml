@@ -1,0 +1,19 @@
+audio_controls = true
+volume_step = 10
+
+[daemon]
+address = "127.0.0.1:9191"
+
+[visualizer]
+preset_dir = "/usr/share/projectM/presets"
+preset_duration_s = 20.0
+shuffle = false
+hard_cuts = true
+soft_cut_s = 5.0
+mesh_width = 64
+mesh_height = 48
+fps_cap = 30
+min_scale = 0.25
+min_fps = 15
+beat_sensitivity = 2.5
+delay_ms = 120
