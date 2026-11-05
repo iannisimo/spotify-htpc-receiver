@@ -1,0 +1,282 @@
+// Now-playing, idle and reconnecting views. Sizes are designed for 1920×1080 and scale with the
+// window. Icons are vector paths so they do not depend on the fonts installed on the HTPC.
+
+global Theme {
+    out property <color> background: #0d1117;
+    out property <color> accent: #1db954;
+    out property <color> text: #ffffff;
+    out property <color> dim: #ffffffbf;
+    out property <color> faint: #ffffff80;
+    out property <color> track: #ffffff2e;
+    out property <color> placeholder: #1c2333;
+    out property <color> warning: #b3261e;
+}
+
+// 24×24 icon paths.
+global Icons {
+    out property <string> previous: "M5 4 L7 4 L7 20 L5 20 Z M19 4 L19 20 L8 12 Z";
+    out property <string> next: "M17 4 L19 4 L19 20 L17 20 Z M5 4 L16 12 L5 20 Z";
+    out property <string> play: "M8 4 L20 12 L8 20 Z";
+    out property <string> pause: "M6 4 L10 4 L10 20 L6 20 Z M14 4 L18 4 L18 20 L14 20 Z";
+    out property <string> visualizer: "M12 2 L14.2 9.8 L22 12 L14.2 14.2 L12 22 L9.8 14.2 L2 12 L9.8 9.8 Z";
+    out property <string> note: "M9 3 L21 1 L21 16 A3 3 0 1 1 19 13.2 L19 5.4 L11 6.7 L11 18 A3 3 0 1 1 9 15.2 Z";
+}
+
+component Icon inherits Path {
+    viewbox-width: 24;
+    viewbox-height: 24;
+    fill: Theme.text;
+}
+
+component RowButton inherits Rectangle {
+    in property <float> s;
+    in property <bool> focused;
+    in property <string> icon;
+    width: 120px * s;
+    height: self.width;
+    border-radius: self.width / 2;
+    background: focused ? #ffffff24 : transparent;
+
+    if focused: ring := Rectangle {
+        border-radius: parent.border-radius;
+        border-width: 5px * s;
+        border-color: Theme.accent;
+    }
+
+    Icon {
+        width: 52px * s;
+        height: self.width;
+        commands: icon;
+    }
+}
+
+export component App inherits Window {
+    title: "HTPC Now Playing";
+    background: Theme.background;
+    preferred-width: 1280px;
+    preferred-height: 720px;
+
+    // Set from Rust (src/ui.rs).
+    in property <bool> connected: true;
+    in property <bool> idle: true;
+    in property <bool> visualizer;
+    in property <string> device-name;
+    in property <string> track-title;
+    in property <string> artist;
+    in property <string> album;
+    in property <string> elapsed;
+    in property <string> total;
+    in property <float> progress;
+    in property <bool> playing;
+    // Focused button: 0 previous, 1 play/pause, 2 next, 3 visualizer.
+    in property <int> focused-button: 1;
+    in property <image> cover-image;
+    in property <bool> has-cover;
+
+    // Receives the key's text; returns true if the key was handled.
+    callback key(string) -> bool;
+
+    property <float> s: min(root.width / 1920px, root.height / 1080px);
+
+    forward-focus: keys;
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (root.key(event.text)) {
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    if !root.idle && !root.visualizer: now-playing := Rectangle {
+        cover-box := Rectangle {
+            x: 120px * root.s;
+            y: (parent.height - self.height) / 2;
+            width: 640px * root.s;
+            height: self.width;
+            border-radius: 20px * root.s;
+            clip: true;
+            background: Theme.placeholder;
+
+            if root.has-cover: Image {
+                width: parent.width;
+                height: parent.height;
+                source: root.cover-image;
+                image-fit: ImageFit.cover;
+            }
+            if !root.has-cover: Icon {
+                width: 200px * root.s;
+                height: self.width;
+                commands: Icons.note;
+                fill: Theme.faint;
+            }
+        }
+
+        VerticalLayout {
+            x: cover-box.x + cover-box.width + 96px * root.s;
+            y: cover-box.y;
+            width: parent.width - self.x - 120px * root.s;
+            height: cover-box.height;
+            alignment: center;
+
+            title-text := Text {
+                text: root.track-title;
+                font-size: 64px * root.s;
+                font-weight: 700;
+                color: Theme.text;
+                overflow: elide;
+                wrap: no-wrap;
+            }
+            if root.artist != "": artist-text := Text {
+                text: root.artist;
+                font-size: 40px * root.s;
+                color: Theme.dim;
+                overflow: elide;
+                wrap: no-wrap;
+            }
+            if root.album != "": album-text := Text {
+                text: root.album;
+                font-size: 32px * root.s;
+                color: Theme.faint;
+                overflow: elide;
+                wrap: no-wrap;
+            }
+
+            Rectangle {
+                height: 64px * root.s;
+            }
+
+            progress-bar := Rectangle {
+                height: 8px * root.s;
+                border-radius: self.height / 2;
+                background: Theme.track;
+                Rectangle {
+                    x: 0;
+                    width: parent.width * clamp(root.progress, 0, 1);
+                    height: parent.height;
+                    border-radius: parent.border-radius;
+                    background: Theme.accent;
+                }
+            }
+            HorizontalLayout {
+                padding-top: 14px * root.s;
+                elapsed-text := Text {
+                    text: root.elapsed;
+                    font-size: 28px * root.s;
+                    color: Theme.faint;
+                }
+                total-text := Text {
+                    text: root.total;
+                    font-size: 28px * root.s;
+                    color: Theme.faint;
+                    horizontal-alignment: right;
+                }
+            }
+
+            Rectangle {
+                height: 72px * root.s;
+            }
+
+            HorizontalLayout {
+                alignment: start;
+                spacing: 40px * root.s;
+                prev-button := RowButton {
+                    s: root.s;
+                    focused: root.focused-button == 0;
+                    icon: Icons.previous;
+                }
+                play-button := RowButton {
+                    s: root.s;
+                    focused: root.focused-button == 1;
+                    icon: root.playing ? Icons.pause : Icons.play;
+                }
+                next-button := RowButton {
+                    s: root.s;
+                    focused: root.focused-button == 2;
+                    icon: Icons.next;
+                }
+                viz-button := RowButton {
+                    s: root.s;
+                    focused: root.focused-button == 3;
+                    icon: Icons.visualizer;
+                }
+            }
+        }
+    }
+
+    if root.idle && !root.visualizer: idle-view := VerticalLayout {
+        alignment: center;
+        spacing: 24px * root.s;
+        padding: 120px * root.s;
+        idle-hint := Text {
+            text: "Open Spotify and pick";
+            font-size: 48px * root.s;
+            color: Theme.dim;
+            horizontal-alignment: center;
+        }
+        idle-device := Text {
+            text: root.device-name != "" ? root.device-name : "this device";
+            font-size: 96px * root.s;
+            font-weight: 700;
+            color: Theme.accent;
+            horizontal-alignment: center;
+            overflow: elide;
+            wrap: no-wrap;
+        }
+    }
+
+    // Stand-in until the visualizer exists; Back returns to now-playing.
+    if root.visualizer: viz-placeholder := Rectangle {
+        background: black;
+        VerticalLayout {
+            alignment: center;
+            spacing: 16px * root.s;
+            Text {
+                text: "Visualizer not available yet";
+                font-size: 48px * root.s;
+                color: Theme.dim;
+                horizontal-alignment: center;
+            }
+            Text {
+                text: "Press Back to return";
+                font-size: 30px * root.s;
+                color: Theme.faint;
+                horizontal-alignment: center;
+            }
+        }
+    }
+
+    // Fades in only after a short delay, so the normal moment of connecting at startup or a
+    // quick reconnect does not flash it.
+    banner := Rectangle {
+        y: 0;
+        height: 96px * root.s;
+        background: Theme.warning;
+        opacity: 0;
+        banner-text := Text {
+            width: parent.width - 64px * root.s;
+            text: "Can't reach Soloist. Is it running? Soloist builds expire after 90 days.";
+            font-size: 32px * root.s;
+            color: Theme.text;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            overflow: elide;
+            wrap: no-wrap;
+        }
+    }
+
+    states [
+        disconnected when !root.connected: {
+            banner.opacity: 1;
+            in {
+                animate banner.opacity {
+                    delay: 1500ms;
+                    duration: 250ms;
+                }
+            }
+            out {
+                animate banner.opacity { duration: 150ms; }
+            }
+        }
+    ]
+}

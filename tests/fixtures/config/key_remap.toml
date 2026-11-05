@@ -1,5 +1,5 @@
 [keys]
-KP_Enter = "back"
-XF86AudioPlay = "OK"
+BackSpace = "ok"
+space = "OK"
 Escape = "none"
 F12 = "launch_missiles"

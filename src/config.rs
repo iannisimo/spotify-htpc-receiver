@@ -14,6 +14,9 @@ use crate::input::{Key, key_from_name};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
+    /// Ask the compositor for a fullscreen window. Some ignore the request by policy (for
+    /// example a Hyprland window rule); `false` gives a normal window, handy for development.
+    pub fullscreen: bool,
     /// Up/Down change Spotify volume on the now-playing screen.
     pub audio_controls: bool,
     /// Volume change per Up/Down press, in percent (1–25).
@@ -48,7 +51,11 @@ pub struct VisualizerConfig {
     pub delay_ms: u32,
 }
 
-/// Maps physical key names (keysym names as shown by `wev`, e.g. `Return`, `XF86Back`) to remote buttons.
+/// Maps physical key names (keysym names as shown by `wev`, e.g. `Return`, `Escape`, `a`) to
+/// remote buttons. Only keys the UI toolkit reports can be used: arrows, Return (also the keypad
+/// Enter), Escape, BackSpace, Tab, space, Delete, Insert, Home, End, Page_Up, Page_Down, Menu,
+/// Pause, F1–F24 and printable characters. Media keys and a dedicated Back key (`XF86Back`) are
+/// not delivered, so a remote's Back button must send Escape or BackSpace.
 #[derive(Debug, Clone, PartialEq)]
 pub struct KeyMap(HashMap<String, Key>);
 
@@ -66,10 +73,8 @@ impl Default for KeyMap {
             ("Up", Key::Up),
             ("Down", Key::Down),
             ("Return", Key::Ok),
-            ("KP_Enter", Key::Ok),
             ("Escape", Key::Back),
             ("BackSpace", Key::Back),
-            ("XF86Back", Key::Back),
         ];
         KeyMap(
             bindings
@@ -83,6 +88,7 @@ impl Default for KeyMap {
 impl Default for Config {
     fn default() -> Self {
         Config {
+            fullscreen: true,
             audio_controls: false,
             volume_step: 5,
             daemon: DaemonConfig {
@@ -172,6 +178,7 @@ fn parse_with_home(text: &str, home: Option<&Path>) -> (Config, Vec<String>) {
 #[derive(Deserialize)]
 #[serde(default)]
 struct RawConfig {
+    fullscreen: bool,
     audio_controls: bool,
     volume_step: i64,
     daemon: RawDaemon,
@@ -207,6 +214,7 @@ impl Default for RawConfig {
         let d = Config::default();
         let v = d.visualizer;
         RawConfig {
+            fullscreen: d.fullscreen,
             audio_controls: d.audio_controls,
             volume_step: d.volume_step.into(),
             daemon: RawDaemon {
@@ -302,6 +310,7 @@ fn validate(raw: RawConfig, home: Option<&Path>, w: &mut Vec<String>) -> Config 
     };
 
     Config {
+        fullscreen: raw.fullscreen,
         audio_controls: raw.audio_controls,
         volume_step: clamp_int(w, "volume_step", raw.volume_step, 1, 25),
         daemon: DaemonConfig { address },
@@ -411,6 +420,7 @@ mod tests {
     #[test]
     fn defaults_are_sane() {
         let cfg = Config::default();
+        assert!(cfg.fullscreen);
         assert_eq!(cfg.volume_step, 5);
         assert_eq!(cfg.daemon.address, "127.0.0.1:9090");
         let viz = &cfg.visualizer;
@@ -425,6 +435,7 @@ mod tests {
     fn full_file_is_read() {
         let (cfg, warnings) = parse_fixture("full.toml");
         assert_eq!(warnings, Vec::<String>::new());
+        assert!(!cfg.fullscreen);
         assert!(cfg.audio_controls);
         assert_eq!(cfg.volume_step, 10);
         assert_eq!(cfg.daemon.address, "127.0.0.1:9191");
@@ -513,8 +524,8 @@ mod tests {
     fn key_remap_applies() {
         let (cfg, warnings) = parse_fixture("key_remap.toml");
         let keys = &cfg.keys;
-        assert_eq!(keys.get("KP_Enter"), Some(Key::Back), "default overridden");
-        assert_eq!(keys.get("XF86AudioPlay"), Some(Key::Ok), "binding added");
+        assert_eq!(keys.get("BackSpace"), Some(Key::Ok), "default overridden");
+        assert_eq!(keys.get("space"), Some(Key::Ok), "binding added");
         assert_eq!(keys.get("Escape"), None, "`none` removes a binding");
         assert_eq!(keys.get("F12"), None, "invalid action skipped");
         assert_eq!(keys.get("Return"), Some(Key::Ok), "untouched defaults kept");
@@ -529,10 +540,8 @@ mod tests {
         assert_eq!(keys.get("Up"), Some(Key::Up));
         assert_eq!(keys.get("Down"), Some(Key::Down));
         assert_eq!(keys.get("Return"), Some(Key::Ok));
-        assert_eq!(keys.get("KP_Enter"), Some(Key::Ok));
         assert_eq!(keys.get("Escape"), Some(Key::Back));
         assert_eq!(keys.get("BackSpace"), Some(Key::Back));
-        assert_eq!(keys.get("XF86Back"), Some(Key::Back));
         assert_eq!(
             keys.get("left"),
             None,

@@ -1,6 +1,7 @@
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use htpc_nowplaying::{config, ui};
 
 /// Spotify Connect now-playing screen and visualizer for a dpad-controlled HTPC.
 #[derive(Parser)]
@@ -19,14 +20,22 @@ enum Command {
 }
 
 fn main() -> ExitCode {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
     let cli = Cli::parse();
     match cli.command.unwrap_or(Command::Run) {
-        Command::Run => not_implemented("run"),
-        Command::Watch => not_implemented("watch"),
+        Command::Run => {
+            let cfg = config::load(&config::default_path());
+            match ui::run_ui(cfg) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("htpc-nowplaying: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Command::Watch => {
+            eprintln!("htpc-nowplaying: `watch` is not implemented yet");
+            ExitCode::FAILURE
+        }
     }
-}
-
-fn not_implemented(command: &str) -> ExitCode {
-    eprintln!("htpc-nowplaying: `{command}` is not implemented yet");
-    ExitCode::FAILURE
 }
