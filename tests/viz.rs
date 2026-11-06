@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use htpc_nowplaying::config::{Config, VisualizerConfig};
 use htpc_nowplaying::viz::adaptive::Quality;
+use htpc_nowplaying::viz::disabled::DisabledPresets;
 use htpc_nowplaying::viz::{GlContext, Visualizer, VizError};
 
 /// Draws an orange border and a white waveform, so a rendered frame is never all black.
@@ -48,7 +49,9 @@ fn no_gl() -> GlContext {
 fn empty_preset_dir_returns_no_presets_error() {
     let dir = temp_dir("empty");
     std::fs::write(dir.join("readme.txt"), "not a preset").unwrap();
-    let err = Visualizer::new(no_gl(), &config(&dir)).err().unwrap();
+    let err = Visualizer::new(no_gl(), &config(&dir), &DisabledPresets::default())
+        .err()
+        .unwrap();
     assert_eq!(err, VizError::NoPresets(vec![dir.clone()]));
     assert!(err.to_string().contains(&dir.display().to_string()));
     std::fs::remove_dir_all(dir).unwrap();
@@ -58,11 +61,25 @@ fn empty_preset_dir_returns_no_presets_error() {
 fn missing_gl_functions_return_gl_unavailable() {
     let dir = temp_dir("nogl");
     std::fs::write(dir.join("test.milk"), TEST_PRESET).unwrap();
-    let err = Visualizer::new(no_gl(), &config(&dir)).err().unwrap();
+    let err = Visualizer::new(no_gl(), &config(&dir), &DisabledPresets::default())
+        .err()
+        .unwrap();
     assert!(
         matches!(&err, VizError::GlUnavailable(m) if m.contains("glGetIntegerv")),
         "{err}"
     );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn all_presets_disabled_is_reported_before_touching_gl() {
+    let dir = temp_dir("alldisabled");
+    std::fs::write(dir.join("test.milk"), TEST_PRESET).unwrap();
+    let disabled = DisabledPresets::from_lines("test.milk\n");
+    let err = Visualizer::new(no_gl(), &config(&dir), &disabled)
+        .err()
+        .unwrap();
+    assert_eq!(err, VizError::AllDisabled);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -247,7 +264,8 @@ fn renders_frames_with_sine_input() {
 
     // SAFETY: the EGL context is current on this thread for the whole test.
     let ctx = unsafe { GlContext::current(&|name| egl.proc_address(name)) };
-    let mut viz = Visualizer::new(ctx, &config(&dir)).expect("visualizer");
+    let mut viz =
+        Visualizer::new(ctx, &config(&dir), &DisabledPresets::default()).expect("visualizer");
     assert_eq!(viz.current_preset_name(), "test");
     assert_eq!(gl.error(), 0);
 
@@ -298,5 +316,84 @@ fn renders_frames_with_sine_input() {
     render(&mut viz, 60, full);
     drop(viz);
     assert_eq!(gl.error(), 0);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Two presets, `off.milk` and `on.milk`, with the first switched off; sorted, not shuffled.
+fn two_presets(name: &str) -> (PathBuf, VisualizerConfig, DisabledPresets) {
+    let dir = temp_dir(name);
+    std::fs::write(dir.join("off.milk"), TEST_PRESET).unwrap();
+    std::fs::write(dir.join("on.milk"), TEST_PRESET).unwrap();
+    let mut cfg = config(&dir);
+    cfg.shuffle = false;
+    (dir, cfg, DisabledPresets::from_lines("off.milk\n"))
+}
+
+#[test]
+#[ignore = "needs libprojectM-4 and an EGL/GLES 3 driver"]
+fn renders_with_disabled_presets() {
+    let (dir, cfg, disabled) = two_presets("disabled");
+    let egl = Egl::new(64);
+    // SAFETY: the EGL context is current on this thread for the whole test.
+    let ctx = unsafe { GlContext::current(&|name| egl.proc_address(name)) };
+    let mut viz = Visualizer::new(ctx, &cfg, &disabled).expect("visualizer");
+    assert_eq!(
+        viz.current_preset_name(),
+        "on",
+        "starts on an enabled preset"
+    );
+    for _ in 0..3 {
+        viz.next_preset();
+        assert_eq!(viz.current_preset_name(), "on");
+    }
+    viz.set_disabled(&DisabledPresets::default());
+    viz.next_preset();
+    assert_eq!(viz.current_preset_name(), "off", "switched back on");
+    drop(viz);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+#[ignore = "needs libprojectM-4 and an EGL/GLES 3 driver"]
+fn demo_disabled_preset_then_resume() {
+    let (dir, cfg, disabled) = two_presets("demo");
+    let egl = Egl::new(64);
+    // SAFETY: the EGL context is current on this thread for the whole test.
+    let ctx = unsafe { GlContext::current(&|name| egl.proc_address(name)) };
+    let mut viz = Visualizer::new(ctx, &cfg, &disabled).expect("visualizer");
+
+    viz.demo(&dir.join("off.milk"))
+        .expect("demo of a disabled preset");
+    assert_eq!(viz.current_preset_name(), "off");
+    let quality = Quality {
+        scale: 1.0,
+        mesh_w: 16,
+        mesh_h: 12,
+        fps_cap: 60,
+    };
+    viz.render(64, 64, quality);
+    assert_eq!(
+        viz.current_preset_name(),
+        "off",
+        "no automatic switch during a demo"
+    );
+
+    viz.end_demo();
+    assert_eq!(
+        viz.current_preset_name(),
+        "on",
+        "resumes on the next enabled preset"
+    );
+    viz.end_demo(); // a second end does nothing
+    assert_eq!(viz.current_preset_name(), "on");
+
+    let missing = dir.join("missing.milk");
+    assert!(matches!(viz.demo(&missing), Err(VizError::PresetLoad(_))));
+    assert_eq!(
+        viz.current_preset_name(),
+        "on",
+        "a failed demo keeps what was showing"
+    );
+    drop(viz);
     std::fs::remove_dir_all(dir).unwrap();
 }

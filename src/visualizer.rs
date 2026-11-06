@@ -2,11 +2,13 @@
 //! decides what the screen shows. Independent of Slint and GL so it can be tested with fakes;
 //! `ui.rs` connects it to the window.
 
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::audio::{self, AudioStatus};
 use crate::config::VisualizerConfig;
 use crate::viz::adaptive::{Adaptive, Quality, quality_range};
+use crate::viz::disabled::DisabledPresets;
 use crate::viz::{self, VizError};
 
 /// How long the track overlay stays up after a track change.
@@ -23,6 +25,8 @@ pub trait AudioSource {
     fn read(&mut self, out: &mut Vec<f32>);
     /// The latest status change since the last call, if any.
     fn status(&mut self) -> Option<AudioStatus>;
+    /// Changes the delay for audio captured from now on.
+    fn set_delay(&mut self, delay_ms: u32);
 }
 
 /// What draws the frames: projectM, or a fake in tests.
@@ -34,6 +38,14 @@ pub trait Renderer {
     fn toggle_lock(&mut self) -> bool;
     fn adjust_beat_sensitivity(&mut self, delta: f32) -> f32;
     fn current_preset_name(&self) -> String;
+    /// Sets beat sensitivity (0–5) and returns the value in effect.
+    fn set_beat_sensitivity(&mut self, value: f32) -> f32;
+    fn set_preset_duration(&mut self, seconds: f64);
+    fn set_shuffle(&mut self, on: bool);
+    fn set_disabled(&mut self, disabled: &DisabledPresets);
+    /// Shows one preset now and stops automatic switching, until `end_demo`.
+    fn demo(&mut self, path: &Path) -> Result<(), VizError>;
+    fn end_demo(&mut self);
 }
 
 /// The live audio source.
@@ -58,6 +70,10 @@ impl AudioSource for LiveAudio {
     fn status(&mut self) -> Option<AudioStatus> {
         self.status.try_iter().last()
     }
+
+    fn set_delay(&mut self, delay_ms: u32) {
+        self.capture.set_delay(delay_ms);
+    }
 }
 
 impl Renderer for viz::Visualizer {
@@ -81,6 +97,24 @@ impl Renderer for viz::Visualizer {
     }
     fn current_preset_name(&self) -> String {
         viz::Visualizer::current_preset_name(self)
+    }
+    fn set_beat_sensitivity(&mut self, value: f32) -> f32 {
+        viz::Visualizer::set_beat_sensitivity(self, value)
+    }
+    fn set_preset_duration(&mut self, seconds: f64) {
+        viz::Visualizer::set_preset_duration(self, seconds);
+    }
+    fn set_shuffle(&mut self, on: bool) {
+        viz::Visualizer::set_shuffle(self, on);
+    }
+    fn set_disabled(&mut self, disabled: &DisabledPresets) {
+        viz::Visualizer::set_disabled(self, disabled);
+    }
+    fn demo(&mut self, path: &Path) -> Result<(), VizError> {
+        viz::Visualizer::demo(self, path)
+    }
+    fn end_demo(&mut self) {
+        viz::Visualizer::end_demo(self);
     }
 }
 
@@ -119,6 +153,22 @@ pub struct Session<A, R> {
     status: Option<(String, Instant)>,
     pcm: Vec<f32>,
     stats: FrameStats,
+    /// Delay for the next capture, and for the running one when it changes.
+    delay_ms: u32,
+    disabled: DisabledPresets,
+    /// Settings changed from the settings panel; a renderer made later gets them too.
+    changed: Changed,
+    /// A preset demo is showing on the current renderer.
+    demo_active: bool,
+}
+
+/// Which settings were changed since the session was made.
+#[derive(Default)]
+struct Changed {
+    beat_sensitivity: Option<f32>,
+    preset_duration_s: Option<f64>,
+    shuffle: Option<bool>,
+    disabled: bool,
 }
 
 /// Frame rate and render cost, logged at debug level every few seconds for tuning.
@@ -149,7 +199,7 @@ impl FrameStats {
 }
 
 impl<A: AudioSource, R: Renderer> Session<A, R> {
-    pub fn new(cfg: &VisualizerConfig) -> Self {
+    pub fn new(cfg: &VisualizerConfig, disabled: DisabledPresets) -> Self {
         let (base, floor) = quality_range(cfg);
         Session {
             base,
@@ -169,6 +219,90 @@ impl<A: AudioSource, R: Renderer> Session<A, R> {
             status: None,
             pcm: Vec::new(),
             stats: FrameStats::default(),
+            delay_ms: cfg.delay_ms,
+            disabled,
+            changed: Changed::default(),
+            demo_active: false,
+        }
+    }
+
+    /// The delay the next capture starts with (the configured one, or the last one set).
+    pub fn delay_ms(&self) -> u32 {
+        self.delay_ms
+    }
+
+    /// The presets switched off, for a renderer made on the GL thread.
+    pub fn disabled(&self) -> &DisabledPresets {
+        &self.disabled
+    }
+
+    pub fn set_beat_sensitivity(&mut self, value: f32) {
+        self.changed.beat_sensitivity = Some(value);
+        if let Some(r) = self.renderer.as_mut() {
+            r.set_beat_sensitivity(value);
+        }
+    }
+
+    pub fn set_preset_duration(&mut self, seconds: f64) {
+        self.changed.preset_duration_s = Some(seconds);
+        if let Some(r) = self.renderer.as_mut() {
+            r.set_preset_duration(seconds);
+        }
+    }
+
+    pub fn set_shuffle(&mut self, on: bool) {
+        self.changed.shuffle = Some(on);
+        if let Some(r) = self.renderer.as_mut() {
+            r.set_shuffle(on);
+        }
+    }
+
+    /// Applies at once to a running capture, and to the next one.
+    pub fn set_delay(&mut self, delay_ms: u32) {
+        self.delay_ms = delay_ms;
+        if let Some(a) = self.audio.as_mut() {
+            a.set_delay(delay_ms);
+        }
+    }
+
+    pub fn set_disabled(&mut self, disabled: DisabledPresets) {
+        self.disabled = disabled;
+        self.changed.disabled = true;
+        if let Some(r) = self.renderer.as_mut() {
+            r.set_disabled(&self.disabled);
+        }
+    }
+
+    /// Shows one preset until [`Session::end_demo`]. The visualizer must be running with a
+    /// renderer, else `Err(VizError::NotOpen)` (the UI opens it first).
+    pub fn demo(&mut self, path: &Path) -> Result<(), VizError> {
+        let renderer = self.renderer.as_mut().ok_or(VizError::NotOpen)?;
+        renderer.demo(path)?;
+        self.demo_active = true;
+        Ok(())
+    }
+
+    pub fn end_demo(&mut self) {
+        if std::mem::take(&mut self.demo_active)
+            && let Some(r) = self.renderer.as_mut()
+        {
+            r.end_demo();
+        }
+    }
+
+    /// Gives a new renderer the settings changed since the session began.
+    fn apply_changes(&self, renderer: &mut R) {
+        if let Some(v) = self.changed.beat_sensitivity {
+            renderer.set_beat_sensitivity(v);
+        }
+        if let Some(s) = self.changed.preset_duration_s {
+            renderer.set_preset_duration(s);
+        }
+        if let Some(on) = self.changed.shuffle {
+            renderer.set_shuffle(on);
+        }
+        if self.changed.disabled {
+            renderer.set_disabled(&self.disabled);
         }
     }
 
@@ -216,6 +350,7 @@ impl<A: AudioSource, R: Renderer> Session<A, R> {
 
     /// Stops the audio now; the renderer waits in [`Session::take_released`] for the GL thread.
     pub fn close(&mut self) {
+        self.end_demo();
         self.open = false;
         self.audio = None;
         self.released.extend(self.renderer.take());
@@ -235,7 +370,11 @@ impl<A: AudioSource, R: Renderer> Session<A, R> {
 
     pub fn attach_renderer(&mut self, renderer: Result<R, VizError>) {
         match renderer {
-            Ok(renderer) if self.open => self.renderer = Some(renderer),
+            Ok(mut renderer) if self.open => {
+                self.apply_changes(&mut renderer);
+                self.demo_active = false;
+                self.renderer = Some(renderer);
+            }
             Ok(renderer) => self.released.push(renderer),
             Err(e) => {
                 log::warn!("visualizer: {e}");
@@ -255,6 +394,7 @@ impl<A: AudioSource, R: Renderer> Session<A, R> {
     /// one is made when a context comes back.
     pub fn gl_lost(&mut self) -> Vec<R> {
         self.last_frame = None;
+        self.demo_active = false;
         let mut all = std::mem::take(&mut self.released);
         all.extend(self.renderer.take());
         all
@@ -382,6 +522,15 @@ impl<A: AudioSource, R: Renderer> Session<A, R> {
                 return ("The visualizer needs OpenGL", why.clone());
             }
             Some(VizError::Init(why)) => return ("The visualizer could not start", why.clone()),
+            Some(VizError::AllDisabled) => {
+                return (
+                    "All presets are switched off",
+                    "Switch some on in Settings → Presets".to_owned(),
+                );
+            }
+            Some(other @ (VizError::NotOpen | VizError::PresetLoad(_))) => {
+                return ("The visualizer could not start", other.to_string());
+            }
             None => {}
         }
         if let Some(why) = &self.audio_error {

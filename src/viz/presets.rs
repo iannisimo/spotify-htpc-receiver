@@ -141,6 +141,71 @@ impl Playlist {
         Some(self.current())
     }
 
+    /// Switches between sorted and shuffled order without changing the current preset.
+    pub fn set_shuffle(&mut self, on: bool) {
+        if self.shuffle == on {
+            return;
+        }
+        self.shuffle = on;
+        let current = self.order[self.pos];
+        self.order = (0..self.presets.len()).collect();
+        self.pos = current;
+        if on {
+            self.reshuffle(Some(current));
+            // The preset on screen leads the new pass.
+            let at = self.order.iter().position(|&i| i == current).unwrap_or(0);
+            self.order.swap(0, at);
+            self.pos = 0;
+        }
+    }
+
+    /// Keeps only the presets for which `keep` is true. The current preset stays current if
+    /// it is kept, else the next kept one in the pass takes over. Returns false, and changes
+    /// nothing, when no preset would be left.
+    pub fn retain(&mut self, keep: impl Fn(&Path) -> bool) -> bool {
+        let flags: Vec<bool> = self.presets.iter().map(|p| keep(p)).collect();
+        if !flags.contains(&true) {
+            return false;
+        }
+        let len = self.order.len();
+        let first_kept = (self.pos..len)
+            .chain(0..self.pos)
+            .find(|&p| flags[self.order[p]])
+            .unwrap_or(0);
+        let pos = self.order[..first_kept]
+            .iter()
+            .filter(|&&i| flags[i])
+            .count();
+        let mut new_index = vec![0; flags.len()];
+        let mut next = 0;
+        for (i, &kept) in flags.iter().enumerate() {
+            new_index[i] = next;
+            next += usize::from(kept);
+        }
+        self.order = self
+            .order
+            .iter()
+            .filter(|&&i| flags[i])
+            .map(|&i| new_index[i])
+            .collect();
+        let mut flags = flags.into_iter();
+        self.presets.retain(|_| flags.next().unwrap_or(false));
+        self.pos = pos;
+        true
+    }
+
+    /// Where `path` is in the current pass, if it is in the list.
+    pub fn position_of(&self, path: &Path) -> Option<usize> {
+        self.order
+            .iter()
+            .position(|&i| self.presets[i].as_path() == path)
+    }
+
+    /// Makes the preset at `index` of the pass current (clamped).
+    pub fn seek(&mut self, index: usize) {
+        self.pos = index.min(self.order.len() - 1);
+    }
+
     /// Fisher–Yates; `avoid_first` keeps the preset just shown from playing again right away.
     fn reshuffle(&mut self, avoid_first: Option<usize>) {
         for i in (1..self.order.len()).rev() {
@@ -243,6 +308,45 @@ mod tests {
         assert_eq!(list.remove_current(), Some(Path::new("a")));
         assert_eq!(list.remove_current(), None);
         assert_eq!(list.current(), Path::new("a"));
+    }
+
+    #[test]
+    fn playlist_retain_and_shuffle() {
+        let mut list = Playlist::new(paths(&["a", "b", "c", "d"]), false, 1).unwrap();
+        list.forward(); // b
+        assert!(list.retain(|p| p != Path::new("a") && p != Path::new("c")));
+        assert_eq!(list.count(), 2);
+        assert_eq!(list.current(), Path::new("b"), "kept preset stays current");
+        assert_eq!(names(&mut list, 2), ["d", "b"]);
+
+        // The current preset is dropped: the next kept one takes over.
+        assert!(list.retain(|p| p == Path::new("d")));
+        assert_eq!(list.current(), Path::new("d"));
+
+        // Nothing left: refused and unchanged.
+        assert!(!list.retain(|_| false));
+        assert_eq!(list.count(), 1);
+        assert_eq!(list.current(), Path::new("d"));
+
+        let mut list = Playlist::new(paths(&["a", "b", "c", "d"]), true, 5).unwrap();
+        list.forward();
+        let shown = list.current().to_owned();
+        list.set_shuffle(false);
+        assert_eq!(
+            list.current(),
+            shown,
+            "same preset after switching to sorted"
+        );
+        let sorted: Vec<String> = names(&mut list, 4);
+        let mut expect = ["a", "b", "c", "d"].map(str::to_owned).to_vec();
+        let at = expect.iter().position(|n| Path::new(n) == shown).unwrap();
+        expect.rotate_left(at + 1);
+        assert_eq!(sorted, expect, "sorted from the current preset");
+        list.set_shuffle(true);
+        let again = list.current().to_owned();
+        assert_eq!(list.position_of(&again), Some(0));
+        list.seek(2);
+        assert_eq!(list.position_of(list.current()), Some(2));
     }
 
     #[test]

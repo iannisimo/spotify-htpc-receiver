@@ -12,12 +12,13 @@ use slint::{
 };
 use tokio::sync::mpsc;
 
-use crate::config::Config;
+use crate::config::{Config, disabled_presets_path};
 use crate::cover::{CoverCache, DecodedImage};
 use crate::input::{Action, Focus, Screen, UiState, handle_key};
 use crate::model::{Command, NowPlaying, Playback, PlayerEvent};
 use crate::player;
 use crate::visualizer::{LiveAudio, Session, View};
+use crate::viz::disabled::DisabledPresets;
 use crate::viz::{GlContext, Visualizer, VizError};
 
 slint::include_modules!();
@@ -127,7 +128,7 @@ fn install_renderer(app: &App, controller: &Rc<RefCell<Controller>>) {
                             // SAFETY: Slint keeps its GL context current around this callback,
                             // and the visualizer is only used and dropped from here.
                             let gl = unsafe { GlContext::current(get_proc_address) };
-                            Visualizer::new(gl, &cfg)
+                            Visualizer::new(gl, &cfg, &s.disabled().clone())
                         }
                         _ => Err(VizError::GlUnavailable(
                             "the window does not render with OpenGL".to_owned(),
@@ -200,7 +201,10 @@ impl Controller {
             RefCell::new(Controller {
                 app,
                 me: me.clone(),
-                viz: Rc::new(RefCell::new(Session::new(&cfg.visualizer))),
+                viz: Rc::new(RefCell::new(Session::new(
+                    &cfg.visualizer,
+                    DisabledPresets::load(&disabled_presets_path()),
+                ))),
                 cfg,
                 player: NowPlaying::default(),
                 ui: UiState::default(),
@@ -248,11 +252,10 @@ impl Controller {
             }
             Action::Send(cmd) => (self.send)(cmd),
             Action::OpenVisualizer => {
-                let delay_ms = self.cfg.visualizer.delay_ms;
                 let track = self.track_names();
-                self.viz
-                    .borrow_mut()
-                    .open(now, || LiveAudio::start(delay_ms), track);
+                let mut viz = self.viz.borrow_mut();
+                let delay_ms = viz.delay_ms();
+                viz.open(now, || LiveAudio::start(delay_ms), track);
             }
             Action::CloseVisualizer => self.viz.borrow_mut().close(),
             Action::PreviousPreset => self.viz.borrow_mut().prev_preset(now),

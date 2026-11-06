@@ -11,14 +11,16 @@ mod projectm;
 pub mod tree;
 
 use std::cell::Cell;
+use std::collections::HashSet;
 use std::ffi::{CStr, CString, c_char, c_uint, c_void};
 use std::fmt;
 use std::os::unix::ffi::OsStrExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::VisualizerConfig;
 use adaptive::Quality;
+use disabled::DisabledPresets;
 use presets::Playlist;
 
 /// Beat sensitivity range accepted by projectM.
@@ -51,6 +53,12 @@ pub enum VizError {
     GlUnavailable(String),
     /// projectM could not be loaded or started.
     Init(String),
+    /// Every preset is switched off in the settings.
+    AllDisabled,
+    /// A demo was asked for while the visualizer is not running.
+    NotOpen,
+    /// A preset asked for by name could not be loaded.
+    PresetLoad(String),
 }
 
 impl fmt::Display for VizError {
@@ -66,11 +74,33 @@ impl fmt::Display for VizError {
             }
             VizError::GlUnavailable(msg) => write!(f, "OpenGL cannot run the visualizer: {msg}"),
             VizError::Init(msg) => write!(f, "projectM could not start: {msg}"),
+            VizError::AllDisabled => f.write_str("all presets are switched off"),
+            VizError::NotOpen => f.write_str("the visualizer is not open"),
+            VizError::PresetLoad(name) => write!(f, "preset {name} could not be loaded"),
         }
     }
 }
 
 impl std::error::Error for VizError {}
+
+/// The preset folder to use and every `.milk` in it: the configured folder, else the first
+/// default one that has presets.
+pub fn find_presets(cfg: &VisualizerConfig) -> Result<(PathBuf, Vec<PathBuf>), VizError> {
+    let dirs = match &cfg.preset_dir {
+        Some(dir) => vec![dir.clone()],
+        None => presets::default_dirs(
+            std::env::var_os("XDG_DATA_HOME"),
+            std::env::var_os("XDG_DATA_DIRS"),
+            std::env::home_dir(),
+        ),
+    };
+    dirs.iter()
+        .find_map(|d| {
+            let found = presets::find(d);
+            (!found.is_empty()).then(|| (d.clone(), found))
+        })
+        .ok_or(VizError::NoPresets(dirs))
+}
 
 /// Set by projectM's callbacks during a call into it, read right after.
 #[derive(Default)]
@@ -111,7 +141,15 @@ pub struct Visualizer {
     gl: gl::Gl,
     /// Boxed so the address handed to projectM's callbacks never moves.
     events: Box<Events>,
+    /// The preset folder, and every preset in it (sorted): the playlist holds the enabled ones.
+    root: PathBuf,
+    all: Vec<PathBuf>,
+    /// Presets that failed to load; never offered again.
+    broken: HashSet<PathBuf>,
+    shuffle: bool,
     playlist: Playlist,
+    /// The preset being demoed from the settings, if any. Automatic switching is paused.
+    demo: Option<PathBuf>,
     /// Holds the reduced-size frame while the scale is below 1.
     offscreen: Option<gl::Offscreen>,
     /// Set when the GL cannot render offscreen; then the scale is ignored.
@@ -124,25 +162,19 @@ pub struct Visualizer {
 }
 
 impl Visualizer {
-    /// Finds presets, loads libprojectM and starts it on the current GL context.
-    pub fn new(gl: GlContext, cfg: &VisualizerConfig) -> Result<Visualizer, VizError> {
-        let dirs = match &cfg.preset_dir {
-            Some(dir) => vec![dir.clone()],
-            None => presets::default_dirs(
-                std::env::var_os("XDG_DATA_HOME"),
-                std::env::var_os("XDG_DATA_DIRS"),
-                std::env::home_dir(),
-            ),
-        };
-        let (dir, found) = dirs
-            .iter()
-            .find_map(|d| {
-                let found = presets::find(d);
-                (!found.is_empty()).then(|| (d.clone(), found))
-            })
-            .ok_or_else(|| VizError::NoPresets(dirs.clone()))?;
-        let playlist = Playlist::new(found, cfg.shuffle, seed())
+    /// Finds presets, loads libprojectM and starts it on the current GL context. Presets in
+    /// `disabled` are left out of the rotation.
+    pub fn new(
+        gl: GlContext,
+        cfg: &VisualizerConfig,
+        disabled: &DisabledPresets,
+    ) -> Result<Visualizer, VizError> {
+        let (dir, all) = find_presets(cfg)?;
+        let mut playlist = Playlist::new(all.clone(), cfg.shuffle, seed())
             .ok_or_else(|| VizError::NoPresets(vec![dir.clone()]))?;
+        if !playlist.retain(|p| enabled(&dir, disabled, p)) {
+            return Err(VizError::AllDisabled);
+        }
         let gl = gl.gl.map_err(VizError::GlUnavailable)?;
         let api = projectm::Api::load().map_err(VizError::Init)?;
 
@@ -189,7 +221,12 @@ impl Visualizer {
             handle,
             gl,
             events,
+            root: dir,
+            all,
+            broken: HashSet::new(),
+            shuffle: cfg.shuffle,
             playlist,
+            demo: None,
             offscreen: None,
             scaling_broken: false,
             applied: None,
@@ -258,7 +295,9 @@ impl Visualizer {
         }
         self.gl.restore(&saved);
         self.after_call();
-        if let Some(hard_cut) = self.events.switch_requested.take() {
+        if let Some(hard_cut) = self.events.switch_requested.take()
+            && self.demo.is_none()
+        {
             self.playlist.forward();
             self.load_current(!hard_cut);
         }
@@ -328,23 +367,139 @@ impl Visualizer {
         self.beat_sensitivity
     }
 
+    /// Sets beat sensitivity, clamped to 0–5. Returns the value in effect.
+    pub fn set_beat_sensitivity(&mut self, value: f32) -> f32 {
+        self.beat_sensitivity = value.clamp(0.0, BEAT_SENSITIVITY_MAX);
+        unsafe { (self.api.projectm_set_beat_sensitivity)(self.handle, self.beat_sensitivity) };
+        self.beat_sensitivity
+    }
+
+    /// Seconds before projectM asks for the next preset.
+    pub fn set_preset_duration(&mut self, seconds: f64) {
+        unsafe { (self.api.projectm_set_preset_duration)(self.handle, seconds) };
+    }
+
+    /// Sorted or shuffled order; the preset on screen stays.
+    pub fn set_shuffle(&mut self, on: bool) {
+        self.shuffle = on;
+        self.playlist.set_shuffle(on);
+    }
+
+    /// Applies a changed list of switched-off presets. The preset on screen keeps playing if
+    /// it is still enabled, otherwise the next enabled one (in folder order) takes over. If
+    /// nothing would be left enabled, the rotation stays as it was.
+    pub fn set_disabled(&mut self, disabled: &DisabledPresets) {
+        let usable: Vec<PathBuf> = self
+            .all
+            .iter()
+            .filter(|p| enabled(&self.root, disabled, p) && !self.broken.contains(*p))
+            .cloned()
+            .collect();
+        let shown = self.shown().to_owned();
+        let Some(mut playlist) = Playlist::new(usable, self.shuffle, seed()) else {
+            log::warn!("every preset is switched off; keeping the current rotation");
+            return;
+        };
+        match playlist.position_of(&shown) {
+            Some(at) => playlist.seek(at),
+            None => {
+                if let Some(next) = self.next_usable_after(&shown, &playlist) {
+                    playlist.seek(playlist.position_of(&next).unwrap_or(0));
+                }
+            }
+        }
+        let changed = playlist.current() != shown;
+        self.playlist = playlist;
+        // While a demo plays, the rotation is rebuilt but the screen is left alone.
+        if changed && self.demo.is_none() {
+            self.load_current(true);
+        }
+    }
+
+    /// Shows `path` now (a hard cut), enabled or not, and pauses automatic switching until
+    /// [`Visualizer::end_demo`]. If it cannot be loaded, what was showing stays.
+    pub fn demo(&mut self, path: &Path) -> Result<(), VizError> {
+        let previous = self.shown().to_owned();
+        self.events.load_failed.set(false);
+        let loaded = self.load_file(path, false);
+        if !loaded {
+            self.load_file(&previous, false);
+            self.events.load_failed.set(false);
+            let name = path.file_stem().unwrap_or(path.as_os_str());
+            return Err(VizError::PresetLoad(name.to_string_lossy().into_owned()));
+        }
+        self.demo = Some(path.to_owned());
+        unsafe { (self.api.projectm_set_preset_locked)(self.handle, true) };
+        Ok(())
+    }
+
+    /// Resumes automatic switching after a demo: from the demoed preset if it is enabled, else
+    /// from the next enabled one. Does nothing without a demo.
+    pub fn end_demo(&mut self) {
+        let Some(demoed) = self.demo.take() else {
+            return;
+        };
+        unsafe { (self.api.projectm_set_preset_locked)(self.handle, self.locked) };
+        match self.playlist.position_of(&demoed) {
+            Some(at) => self.playlist.seek(at), // already on screen
+            None => {
+                if let Some(next) = self.next_usable_after(&demoed, &self.playlist) {
+                    if let Some(at) = self.playlist.position_of(&next) {
+                        self.playlist.seek(at);
+                    }
+                    self.load_current(true);
+                }
+            }
+        }
+    }
+
+    /// The preset on screen: the demo, else the playlist's.
+    fn shown(&self) -> &Path {
+        self.demo
+            .as_deref()
+            .unwrap_or_else(|| self.playlist.current())
+    }
+
+    /// The first preset of `playlist` after `path` in folder order, wrapping around.
+    fn next_usable_after(&self, path: &Path, playlist: &Playlist) -> Option<PathBuf> {
+        let start = self.all.iter().position(|p| p == path).unwrap_or(0);
+        self.all[start..]
+            .iter()
+            .chain(&self.all[..start])
+            .find(|p| playlist.position_of(p).is_some())
+            .cloned()
+    }
+
     pub fn current_preset_name(&self) -> String {
-        self.playlist.current_name()
+        match &self.demo {
+            Some(path) => path
+                .file_stem()
+                .unwrap_or(path.as_os_str())
+                .to_string_lossy()
+                .into_owned(),
+            None => self.playlist.current_name(),
+        }
+    }
+
+    /// Hands one preset file to projectM. False if it failed to load.
+    fn load_file(&mut self, path: &Path, smooth: bool) -> bool {
+        match CString::new(path.as_os_str().as_bytes()) {
+            Ok(file) => unsafe {
+                (self.api.projectm_load_preset_file)(self.handle, file.as_ptr(), smooth)
+            },
+            Err(_) => self.events.load_failed.set(true), // NUL in a path: cannot load
+        }
+        !self.events.load_failed.take()
     }
 
     /// Loads the playlist's current preset, skipping (and forgetting) any that fail.
     fn load_current(&mut self, smooth: bool) {
         loop {
-            let path = self.playlist.current();
-            match CString::new(path.as_os_str().as_bytes()) {
-                Ok(file) => unsafe {
-                    (self.api.projectm_load_preset_file)(self.handle, file.as_ptr(), smooth)
-                },
-                Err(_) => self.events.load_failed.set(true), // NUL in a path: cannot load
-            }
-            if !self.events.load_failed.take() {
+            let path = self.playlist.current().to_owned();
+            if self.load_file(&path, smooth) {
                 return;
             }
+            self.broken.insert(path);
             if self.playlist.remove_current().is_none() {
                 log::warn!("no projectM preset could be loaded");
                 return;
@@ -354,10 +509,24 @@ impl Visualizer {
 
     /// Clears a failure reported during a render (a preset that fails only once drawn).
     fn after_call(&mut self) {
-        if self.events.load_failed.take() && self.playlist.remove_current().is_some() {
-            self.load_current(false);
+        if self.events.load_failed.take() {
+            if self.demo.is_some() {
+                return; // the demo preset failed once drawn; the user sees it and can move on
+            }
+            self.broken.insert(self.playlist.current().to_owned());
+            if self.playlist.remove_current().is_some() {
+                self.load_current(false);
+            }
         }
     }
+}
+
+/// Whether the settings leave `path` (below `root`) switched on.
+fn enabled(root: &Path, disabled: &DisabledPresets, path: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(root) else {
+        return true;
+    };
+    !disabled.is_disabled(relative)
 }
 
 impl Drop for Visualizer {

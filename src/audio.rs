@@ -95,6 +95,14 @@ impl Capture {
     pub fn read(&mut self, out: &mut Vec<f32>) {
         lock(&self.buffer).read(Instant::now(), out);
     }
+
+    /// Changes the delay for samples captured from now on; those already queued keep theirs.
+    pub fn set_delay(&self, delay_ms: u32) {
+        let delay = Duration::from_millis(delay_ms.into());
+        let mut line = lock(&self.buffer);
+        let size = capacity(line.rate, delay);
+        line.set_delay(delay, size);
+    }
 }
 
 impl Drop for Capture {
@@ -170,9 +178,11 @@ fn lock(buffer: &Mutex<DelayLine>) -> MutexGuard<'_, DelayLine> {
 struct DelayLine {
     delay: Duration,
     capacity: usize,
+    /// Sample rate the capacity was computed for.
+    rate: u32,
     samples: VecDeque<f32>,
-    /// One entry per pushed chunk still (partly) held: when it is due, and how many samples of
-    /// it remain. The counts add up to `samples.len()`.
+    /// One entry per pushed chunk still (partly) held, oldest first: when it is due, and how
+    /// many samples of it remain. The counts add up to `samples.len()`.
     chunks: VecDeque<(Instant, usize)>,
 }
 
@@ -181,14 +191,42 @@ impl DelayLine {
         DelayLine {
             delay,
             capacity,
+            rate: DEFAULT_RATE,
             samples: VecDeque::with_capacity(capacity),
             chunks: VecDeque::new(),
         }
     }
 
-    /// Empties the line and sets a new capacity (the sample rate changed).
-    fn reset(&mut self, capacity: usize) {
-        *self = DelayLine::new(self.delay, capacity);
+    /// Empties the line and sizes it for a new sample rate.
+    fn reset(&mut self, rate: u32) {
+        let mut fresh = DelayLine::new(self.delay, capacity(rate, self.delay));
+        fresh.rate = rate;
+        *self = fresh;
+    }
+
+    /// Changes the delay for samples pushed from now on. Samples already queued keep their
+    /// release times; only the oldest are dropped if the new capacity is smaller.
+    fn set_delay(&mut self, delay: Duration, capacity: usize) {
+        self.delay = delay;
+        self.capacity = capacity;
+        self.drop_oldest(self.samples.len().saturating_sub(capacity));
+    }
+
+    /// Drops the `excess` oldest samples.
+    fn drop_oldest(&mut self, mut excess: usize) {
+        self.samples.drain(..excess);
+        while excess > 0 {
+            let Some(front) = self.chunks.front_mut() else {
+                break;
+            };
+            if front.1 <= excess {
+                excess -= front.1;
+                self.chunks.pop_front();
+            } else {
+                front.1 -= excess;
+                excess = 0;
+            }
+        }
     }
 
     fn clear(&mut self) {
@@ -203,36 +241,27 @@ impl DelayLine {
         if chunk.is_empty() {
             return;
         }
-        let mut excess = (self.samples.len() + chunk.len()).saturating_sub(self.capacity);
-        self.samples.drain(..excess);
-        while excess > 0 {
-            let Some(front) = self.chunks.front_mut() else {
-                break;
-            };
-            if front.1 <= excess {
-                excess -= front.1;
-                self.chunks.pop_front();
-            } else {
-                front.1 -= excess;
-                excess = 0;
-            }
-        }
+        self.drop_oldest((self.samples.len() + chunk.len()).saturating_sub(self.capacity));
         self.samples.extend(chunk);
         self.chunks.push_back((now + self.delay, chunk.len()));
     }
 
-    /// Replaces `out` with every sample due at `now`.
+    /// Replaces `out` with every sample due at `now`, oldest first. After the delay was
+    /// shortened, newer chunks can be due before older ones; those come out first.
     fn read(&mut self, now: Instant, out: &mut Vec<f32>) {
         out.clear();
-        let mut due = 0;
-        while let Some(&(at, len)) = self.chunks.front() {
-            if at > now {
-                break;
+        let mut start = 0; // where chunk `i` begins in `samples`
+        let mut i = 0;
+        while i < self.chunks.len() {
+            let (at, len) = self.chunks[i];
+            if at <= now {
+                out.extend(self.samples.drain(start..start + len));
+                self.chunks.remove(i);
+            } else {
+                start += len;
+                i += 1;
             }
-            due += len;
-            self.chunks.pop_front();
         }
-        out.extend(self.samples.drain(..due));
     }
 }
 
@@ -671,9 +700,7 @@ fn open_stream(
                     info.rate(),
                     info.channels()
                 );
-                let mut line = lock(&buffer_format);
-                let delay = line.delay;
-                line.reset(capacity(info.rate().max(1), delay));
+                lock(&buffer_format).reset(info.rate().max(1));
             }
         })
         .process(move |stream, _| {
@@ -784,6 +811,35 @@ mod tests {
         let mut line = DelayLine::new(Duration::ZERO, 2);
         line.push(t, &[1.0, 2.0, 3.0, 4.0]);
         assert_eq!(read_at(&mut line, t), [3.0, 4.0]);
+    }
+
+    #[test]
+    fn delay_change_applies_to_new_samples() {
+        let t = Instant::now();
+        let mut line = DelayLine::new(ms(100), 16);
+        line.push(t, &[1.0, 1.0]);
+        line.set_delay(Duration::ZERO, 16);
+        line.push(t + ms(1), &[2.0, 2.0]);
+        assert_eq!(read_at(&mut line, t + ms(1)), [2.0, 2.0]);
+        assert!(read_at(&mut line, t + ms(99)).is_empty());
+        assert_eq!(read_at(&mut line, t + ms(100)), [1.0, 1.0]);
+    }
+
+    #[test]
+    fn longer_delay_keeps_order_and_smaller_capacity_drops_oldest() {
+        let t = Instant::now();
+        let mut line = DelayLine::new(Duration::ZERO, 8);
+        line.push(t, &[1.0, 1.0]);
+        line.set_delay(ms(50), 8);
+        line.push(t, &[2.0, 2.0]);
+        assert_eq!(read_at(&mut line, t), [1.0, 1.0]);
+        assert_eq!(read_at(&mut line, t + ms(50)), [2.0, 2.0]);
+
+        let mut line = DelayLine::new(ms(10), 8);
+        line.push(t, &[1.0, 1.0]);
+        line.push(t, &[2.0, 2.0]);
+        line.set_delay(ms(10), 2);
+        assert_eq!(read_at(&mut line, t + ms(10)), [2.0, 2.0]);
     }
 
     #[test]

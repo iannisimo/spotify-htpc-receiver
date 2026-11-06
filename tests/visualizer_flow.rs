@@ -1,7 +1,7 @@
 //! The visualizer screen's behaviour, with fake audio and renderer.
 
 use std::cell::RefCell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -12,6 +12,7 @@ use htpc_nowplaying::visualizer::{
 };
 use htpc_nowplaying::viz::VizError;
 use htpc_nowplaying::viz::adaptive::Quality;
+use htpc_nowplaying::viz::disabled::DisabledPresets;
 
 /// What the fakes saw, shared with the test.
 #[derive(Default)]
@@ -24,6 +25,8 @@ struct Log {
     presets: Vec<&'static str>,
     /// Status changes the fake audio reports on its next poll.
     statuses: Vec<AudioStatus>,
+    /// Settings and demo calls the fakes received, in order.
+    calls: Vec<String>,
 }
 
 type Shared = Rc<RefCell<Log>>;
@@ -40,6 +43,12 @@ impl AudioSource for FakeAudio {
     }
     fn status(&mut self) -> Option<AudioStatus> {
         self.log.borrow_mut().statuses.drain(..).next_back()
+    }
+    fn set_delay(&mut self, delay_ms: u32) {
+        self.log
+            .borrow_mut()
+            .calls
+            .push(format!("delay {delay_ms}"));
     }
 }
 
@@ -87,6 +96,32 @@ impl Renderer for FakeRenderer {
     fn current_preset_name(&self) -> String {
         PRESETS[self.preset].to_owned()
     }
+    fn set_beat_sensitivity(&mut self, value: f32) -> f32 {
+        self.sensitivity = value.clamp(0.0, 5.0);
+        let calls = &mut self.log.borrow_mut().calls;
+        calls.push(format!("sensitivity {value:.1}"));
+        self.sensitivity
+    }
+    fn set_preset_duration(&mut self, seconds: f64) {
+        let calls = &mut self.log.borrow_mut().calls;
+        calls.push(format!("duration {seconds:.0}"));
+    }
+    fn set_shuffle(&mut self, on: bool) {
+        self.log.borrow_mut().calls.push(format!("shuffle {on}"));
+    }
+    fn set_disabled(&mut self, disabled: &DisabledPresets) {
+        let entries: Vec<&str> = disabled.entries().collect();
+        let calls = &mut self.log.borrow_mut().calls;
+        calls.push(format!("disabled {}", entries.join(",")));
+    }
+    fn demo(&mut self, path: &Path) -> Result<(), VizError> {
+        let calls = &mut self.log.borrow_mut().calls;
+        calls.push(format!("demo {}", path.display()));
+        Ok(())
+    }
+    fn end_demo(&mut self) {
+        self.log.borrow_mut().calls.push("end_demo".to_owned());
+    }
 }
 
 impl Drop for FakeRenderer {
@@ -104,7 +139,7 @@ struct Harness {
 impl Harness {
     fn new() -> Harness {
         Harness {
-            session: Session::new(&viz_config()),
+            session: Session::new(&viz_config(), DisabledPresets::default()),
             log: Shared::default(),
             t0: Instant::now(),
         }
@@ -428,6 +463,109 @@ fn losing_the_gl_context_drops_the_renderer_and_rebuilds_it() {
     assert!(h.session.needs_renderer());
     h.gl_pass();
     assert!(h.view(0).rendering);
+}
+
+#[test]
+fn live_settings_reach_the_renderer() {
+    let mut h = Harness::running();
+    h.session.set_beat_sensitivity(2.5);
+    h.session.set_preset_duration(45.0);
+    h.session.set_shuffle(false);
+    h.session.set_delay(120);
+    h.session
+        .set_disabled(DisabledPresets::from_lines("Fractal/\nx.milk\n"));
+    assert_eq!(
+        h.log.borrow().calls,
+        [
+            "sensitivity 2.5",
+            "duration 45",
+            "shuffle false",
+            "delay 120",
+            "disabled Fractal/,x.milk",
+        ]
+    );
+    assert_eq!(h.session.delay_ms(), 120);
+    assert!(h.session.disabled().contains("x.milk"));
+}
+
+#[test]
+fn settings_set_while_closed_apply_on_open() {
+    let mut h = Harness::new();
+    h.session.set_beat_sensitivity(0.5);
+    h.session.set_shuffle(false);
+    h.session.set_delay(200);
+    h.session.set_disabled(DisabledPresets::from_lines("a/\n"));
+    assert!(h.log.borrow().calls.is_empty(), "no renderer or audio yet");
+    assert_eq!(h.session.delay_ms(), 200, "the next capture starts with it");
+
+    h.open(Some(AudioStatus::Active));
+    h.gl_pass();
+    assert_eq!(
+        h.log.borrow().calls,
+        ["sensitivity 0.5", "shuffle false", "disabled a/"],
+        "settings never touched stay as configured"
+    );
+}
+
+#[test]
+fn all_disabled_shows_message_and_back_works() {
+    let mut h = Harness::new();
+    h.open(Some(AudioStatus::Active));
+    h.session.attach_renderer(Err(VizError::AllDisabled));
+    h.session.poll();
+    let v = h.view(0);
+    assert!(!v.rendering);
+    assert_eq!(v.message, "All presets are switched off");
+    assert_eq!(v.detail, "Switch some on in Settings → Presets");
+    assert!(!h.session.needs_renderer(), "does not retry every frame");
+    h.session.close();
+    assert!(!h.session.is_open());
+    assert_eq!(h.log.borrow().audio_dropped, 1);
+}
+
+#[test]
+fn demo_pauses_and_end_demo_resumes() {
+    let mut h = Harness::running();
+    let preset = Path::new("/p/A/a1.milk");
+    h.session.demo(preset).unwrap();
+    h.session.frame(h.at(0), 1920, 1080);
+    h.session.end_demo();
+    h.session.end_demo(); // without a demo it does nothing
+    assert_eq!(
+        h.log.borrow().calls,
+        ["demo /p/A/a1.milk", "end_demo"],
+        "one demo, one end"
+    );
+}
+
+#[test]
+fn demo_when_closed_is_not_open() {
+    let mut h = Harness::new();
+    assert_eq!(
+        h.session.demo(Path::new("/p/a.milk")),
+        Err(VizError::NotOpen)
+    );
+    // Opened but no renderer yet: the same.
+    h.open(Some(AudioStatus::Active));
+    assert_eq!(
+        h.session.demo(Path::new("/p/a.milk")),
+        Err(VizError::NotOpen)
+    );
+    assert!(h.log.borrow().calls.is_empty());
+}
+
+#[test]
+fn close_ends_demo() {
+    let mut h = Harness::running();
+    h.session.demo(Path::new("/p/a.milk")).unwrap();
+    h.session.close();
+    assert_eq!(h.log.borrow().calls, ["demo /p/a.milk", "end_demo"]);
+    // Nothing is left to end after reopening.
+    h.gl_pass();
+    h.open(Some(AudioStatus::Active));
+    h.gl_pass();
+    h.session.end_demo();
+    assert_eq!(h.log.borrow().calls.len(), 2);
 }
 
 #[test]
