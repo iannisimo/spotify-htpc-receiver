@@ -53,6 +53,7 @@ pub fn parse_message(raw: &str) -> Result<Vec<PlayerEvent>, ParseError> {
             push_device_name(&msg, &mut events);
             let logged_in = msg["logged_in"].as_bool().unwrap_or(false);
             let active = msg["is_active"].as_bool().unwrap_or(false);
+            events.push(PlayerEvent::LoggedIn(logged_in));
             events.push(PlayerEvent::DeviceActive(logged_in && active));
         }
         "device_changed" => {

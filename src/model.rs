@@ -28,6 +28,8 @@ pub enum PlayerEvent {
     Disconnected,
     /// The name the daemon shows in Spotify's device list.
     DeviceName(String),
+    /// Whether a Spotify account is paired with the daemon.
+    LoggedIn(bool),
     DeviceActive(bool),
     TrackChanged(Option<Track>),
     PlaybackChanged(Playback),
@@ -58,6 +60,9 @@ pub struct NowPlaying {
     pub connected: bool,
     /// Shown on the idle screen ("pick <device name> in Spotify"); `None` until the daemon says.
     pub device_name: Option<String>,
+    /// Whether an account is paired with the daemon; `None` until it says. A dropped
+    /// connection leaves it as it was.
+    pub logged_in: Option<bool>,
     /// Whether this device is the one playing. While it is not, Soloist still relays what the
     /// active device (the phone) plays; none of that belongs on this screen.
     active: bool,
@@ -83,6 +88,7 @@ impl NowPlaying {
                 self.connected = false;
             }
             PlayerEvent::DeviceName(name) => self.device_name = Some(name),
+            PlayerEvent::LoggedIn(logged_in) => self.logged_in = Some(logged_in),
             PlayerEvent::DeviceActive(active) => {
                 self.active = active;
                 if !active {
@@ -385,6 +391,19 @@ mod tests {
         let t0 = Instant::now();
         let np = playing_at(t0 + ms(1_000), 5_000);
         assert_eq!(np.position_ms(t0), 5_000);
+    }
+
+    #[test]
+    fn logged_in_is_tracked() {
+        let t0 = Instant::now();
+        let mut np = NowPlaying::default();
+        assert_eq!(np.logged_in, None);
+        np.apply(PlayerEvent::LoggedIn(false), t0, UNIX_NOW);
+        assert_eq!(np.logged_in, Some(false));
+        np.apply(PlayerEvent::LoggedIn(true), t0, UNIX_NOW);
+        assert_eq!(np.logged_in, Some(true));
+        np.apply(PlayerEvent::Disconnected, t0, UNIX_NOW);
+        assert_eq!(np.logged_in, Some(true));
     }
 
     #[test]

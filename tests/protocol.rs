@@ -63,6 +63,7 @@ fn auth_state_active() {
         parse("auth_state.json"),
         [
             PlayerEvent::DeviceName("HTPC".to_owned()),
+            PlayerEvent::LoggedIn(true),
             PlayerEvent::DeviceActive(true),
         ]
     );
@@ -76,6 +77,7 @@ fn auth_state_logged_out_is_inactive() {
         parse_value(&msg),
         [
             PlayerEvent::DeviceName("HTPC".to_owned()),
+            PlayerEvent::LoggedIn(false),
             PlayerEvent::DeviceActive(false),
         ]
     );
