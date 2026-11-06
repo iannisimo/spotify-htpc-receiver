@@ -1,61 +1,23 @@
 //! The Soloist client against an in-process fake Soloist that replays recorded messages.
 
-use std::path::Path;
+mod common;
+
 use std::time::Duration;
 
+use common::{FakeSoloist, WAIT, Ws, fixture, send_text};
 use futures_util::{SinkExt, StreamExt};
 use htpc_nowplaying::config::{Config, DaemonConfig};
 use htpc_nowplaying::model::{Command, PlayerEvent};
 use htpc_nowplaying::player::{self, PlayerClient, parse_message};
 use serde_json::{Value, json};
-use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
-use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::frame::Frame;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::{Data, OpCode};
 
-/// Upper bound for anything a test waits for; reconnects take about 1 s.
-const WAIT: Duration = Duration::from_secs(5);
-
-type Ws = WebSocketStream<TcpStream>;
-
-fn fixture(name: &str) -> String {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/soloist")
-        .join(name);
-    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
-}
-
 fn fixture_events(name: &str) -> Vec<PlayerEvent> {
     parse_message(&fixture(name)).unwrap()
-}
-
-struct FakeSoloist {
-    listener: TcpListener,
-}
-
-impl FakeSoloist {
-    async fn start() -> (FakeSoloist, DaemonConfig) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let cfg = DaemonConfig {
-            address: listener.local_addr().unwrap().to_string(),
-        };
-        (FakeSoloist { listener }, cfg)
-    }
-
-    async fn accept(&self) -> Ws {
-        let (stream, _) = timeout(WAIT, self.listener.accept())
-            .await
-            .expect("client connects")
-            .unwrap();
-        tokio_tungstenite::accept_async(stream).await.unwrap()
-    }
-}
-
-async fn send_text(ws: &mut Ws, text: &str) {
-    ws.send(Message::text(text)).await.unwrap();
 }
 
 /// The next command frame the client sent, as JSON.
@@ -179,25 +141,18 @@ async fn reconnects_after_connection_drops_without_close() {
 
 #[tokio::test]
 async fn starts_while_daemon_down_then_connects_when_it_appears() {
-    // Reserve a free port, then leave it closed so the first attempts fail.
-    let port = TcpListener::bind("127.0.0.1:0")
-        .await
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    // A free port left closed, so the first attempts fail.
+    let address = FakeSoloist::free_address();
     let (tx, mut events) = mpsc::channel(64);
     let _client = player::spawn(
         DaemonConfig {
-            address: format!("127.0.0.1:{port}"),
+            address: address.clone(),
         },
         tx,
     );
     assert_no_event(&mut events, Duration::from_millis(300)).await;
 
-    let fake = FakeSoloist {
-        listener: TcpListener::bind(("127.0.0.1", port)).await.unwrap(),
-    };
+    let fake = FakeSoloist::start_at(&address).await;
     let _ws = fake.accept().await;
     // Failed attempts are silent: the first event is Connected, not Disconnected.
     expect_events(&mut events, &[PlayerEvent::Connected]).await;
