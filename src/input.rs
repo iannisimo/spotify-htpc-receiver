@@ -1,7 +1,69 @@
 //! Remote/keyboard input: what each button does on each screen.
 
+use std::time::{Duration, Instant};
+
 use crate::config::Config;
 use crate::model::Command;
+
+/// How long OK must be held to open the settings panel.
+pub const HOLD: Duration = Duration::from_millis(600);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OkGesture {
+    /// Released before [`HOLD`]: the normal OK action.
+    Tap,
+    /// Held for [`HOLD`].
+    Hold,
+}
+
+/// Tells a tap of OK from a hold. A tap is only known on release; a hold fires once, while
+/// the button is still down (the caller polls it from a timer).
+#[derive(Debug, Default)]
+pub struct OkHold {
+    pressed_at: Option<Instant>,
+    fired: bool,
+}
+
+impl OkHold {
+    /// OK went down. Key auto-repeat is ignored. A press without a release in between (the
+    /// release was lost) starts fresh.
+    pub fn press(&mut self, now: Instant, repeat: bool) {
+        if repeat {
+            return;
+        }
+        self.pressed_at = Some(now);
+        self.fired = false;
+    }
+
+    /// OK went up. `Tap` unless the hold already fired; a release with no press is ignored.
+    pub fn release(&mut self, now: Instant) -> Option<OkGesture> {
+        let at = self.pressed_at.take()?;
+        if std::mem::take(&mut self.fired) {
+            return None;
+        }
+        // The poll timer may not have run yet.
+        Some(if now.saturating_duration_since(at) >= HOLD {
+            OkGesture::Hold
+        } else {
+            OkGesture::Tap
+        })
+    }
+
+    /// `Hold` once, when OK has been down for [`HOLD`].
+    pub fn poll(&mut self, now: Instant) -> Option<OkGesture> {
+        let at = self.pressed_at?;
+        if self.fired || now.saturating_duration_since(at) < HOLD {
+            return None;
+        }
+        self.fired = true;
+        Some(OkGesture::Hold)
+    }
+
+    /// Forgets the press (the window lost focus; no release will come).
+    pub fn reset(&mut self) {
+        *self = OkHold::default();
+    }
+}
 
 /// A logical remote button.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -158,6 +220,92 @@ mod tests {
         UiState {
             screen: Screen::Visualizer,
             focus: Focus::Visualizer,
+        }
+    }
+
+    fn ms(n: u64) -> Duration {
+        Duration::from_millis(n)
+    }
+
+    #[test]
+    fn tap_under_600ms() {
+        let t = Instant::now();
+        let mut ok = OkHold::default();
+        ok.press(t, false);
+        assert_eq!(ok.poll(t + ms(599)), None);
+        assert_eq!(ok.release(t + ms(599)), Some(OkGesture::Tap));
+        assert_eq!(ok.release(t + ms(600)), None, "one release per press");
+    }
+
+    #[test]
+    fn hold_fires_once_at_600ms() {
+        let t = Instant::now();
+        let mut ok = OkHold::default();
+        ok.press(t, false);
+        assert_eq!(ok.poll(t + ms(599)), None);
+        assert_eq!(ok.poll(t + ms(600)), Some(OkGesture::Hold));
+        assert_eq!(ok.poll(t + ms(700)), None);
+        assert_eq!(ok.release(t + ms(800)), None, "a hold is not also a tap");
+    }
+
+    #[test]
+    fn late_poll_still_counts_as_a_hold() {
+        let t = Instant::now();
+        let mut ok = OkHold::default();
+        ok.press(t, false);
+        assert_eq!(ok.release(t + ms(900)), Some(OkGesture::Hold));
+    }
+
+    #[test]
+    fn repeats_are_ignored() {
+        let t = Instant::now();
+        let mut ok = OkHold::default();
+        ok.press(t, false);
+        ok.press(t + ms(500), true);
+        ok.press(t + ms(550), true);
+        assert_eq!(
+            ok.poll(t + ms(600)),
+            Some(OkGesture::Hold),
+            "timed from the first press"
+        );
+    }
+
+    #[test]
+    fn release_without_press_is_ignored() {
+        let mut ok = OkHold::default();
+        assert_eq!(ok.release(Instant::now()), None);
+    }
+
+    #[test]
+    fn focus_loss_resets_hold() {
+        let t = Instant::now();
+        let mut ok = OkHold::default();
+        ok.press(t, false);
+        ok.reset();
+        assert_eq!(ok.release(t + ms(50)), None);
+        assert_eq!(ok.poll(t + ms(900)), None);
+        ok.press(t + ms(1000), false);
+        assert_eq!(ok.release(t + ms(1100)), Some(OkGesture::Tap));
+    }
+
+    #[test]
+    fn a_press_after_a_lost_release_starts_fresh() {
+        let t = Instant::now();
+        let mut ok = OkHold::default();
+        ok.press(t, false);
+        assert_eq!(ok.poll(t + ms(600)), Some(OkGesture::Hold));
+        // No release ever came; the next press is a new gesture.
+        ok.press(t + ms(5000), false);
+        assert_eq!(ok.release(t + ms(5100)), Some(OkGesture::Tap));
+    }
+
+    #[test]
+    fn settings_key_opens_settings_everywhere() {
+        let c = Config::default();
+        for mut ui in [now_playing(Focus::Next), visualizer(), UiState::default()] {
+            let before = ui;
+            assert_eq!(handle_key(&mut ui, Key::Settings, &c), Action::OpenSettings);
+            assert_eq!(ui, before, "the screen underneath does not change");
         }
     }
 
