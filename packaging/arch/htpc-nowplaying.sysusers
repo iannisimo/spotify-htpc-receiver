@@ -1,0 +1,3 @@
+# Members may open and close Soloist's pairing port through the pairing helper, without a
+# password (see /etc/sudoers.d/htpc-nowplaying).
+g htpc-nowplaying - -

@@ -1,0 +1,5 @@
+# Installed by the htpc-nowplaying package. Members of the htpc-nowplaying group may open and
+# close Soloist's pairing port in the firewall without a password, and nothing else. The helper
+# itself only opens the port of a Soloist owned by the user who called it.
+# Join with: sudo usermod -aG htpc-nowplaying $USER   (then log in again)
+%htpc-nowplaying ALL=(root) NOPASSWD: /usr/lib/htpc-nowplaying/pairing-port open, /usr/lib/htpc-nowplaying/pairing-port close, /usr/lib/htpc-nowplaying/pairing-port status

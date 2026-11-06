@@ -1,0 +1,97 @@
+# Maintainer: Simone Ianniciello <s.ianniciello@studenti.unipi.it>
+#
+# Spotify Soloist itself is not packaged: Spotify does not allow redistributing it. The package
+# ships `htpc-nowplaying-install-soloist`, which downloads it from Spotify into the user's home.
+
+pkgname=htpc-nowplaying-git
+_pkgname=htpc-nowplaying
+pkgver=0.1.0.r0.g0000000
+pkgrel=1
+pkgdesc='Spotify Connect speaker for an HTPC: now-playing screen and projectM visualizer driven by a TV remote'
+arch=('x86_64' 'aarch64')
+url='https://github.com/iannisimo/spotify-htpc-receiver'
+license=('LicenseRef-unknown')
+depends=(
+  'gcc-libs' 'glibc'
+  'pipewire'
+  'fontconfig' 'freetype2'
+  'wayland' 'libxkbcommon' 'libglvnd'
+  'sudo'
+  'curl'
+)
+makedepends=('cargo' 'clang' 'git' 'pkgconf')
+optdepends=(
+  'libprojectm: the visualizer'
+  'ufw: firewall the pairing helper can open the pairing port in'
+  'firewalld: firewall the pairing helper can open the pairing port in'
+)
+provides=("$_pkgname")
+conflicts=("$_pkgname")
+backup=("etc/sudoers.d/$_pkgname")
+install="$_pkgname.install"
+source=("$_pkgname::git+$url.git")
+sha256sums=('SKIP')
+
+_helper=/usr/lib/$_pkgname/pairing-port
+
+pkgver() {
+  cd "$_pkgname"
+  local version
+  version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+  printf '%s.r%s.g%s' "$version" "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+}
+
+prepare() {
+  cd "$_pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$_pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  export HTPC_PAIRING_HELPER=$_helper
+  cargo build --frozen --release
+}
+
+check() {
+  cd "$_pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  export HTPC_PAIRING_HELPER=$_helper
+  cargo test --frozen --release
+  sh -n packaging/pairing-port
+  visudo -cf packaging/arch/$_pkgname.sudoers
+}
+
+package() {
+  cd "$_pkgname"
+
+  install -Dm755 "target/release/$_pkgname" "$pkgdir/usr/bin/$_pkgname"
+  install -Dm755 packaging/install-soloist.sh "$pkgdir/usr/bin/$_pkgname-install-soloist"
+  install -Dm755 packaging/pairing-port "$pkgdir$_helper"
+
+  install -Dm644 packaging/arch/$_pkgname.sysusers "$pkgdir/usr/lib/sysusers.d/$_pkgname.conf"
+  # /etc/sudoers.d belongs to the sudo package with mode 750: create it that way first.
+  install -dm750 "$pkgdir/etc/sudoers.d"
+  install -m440 packaging/arch/$_pkgname.sudoers "$pkgdir/etc/sudoers.d/$_pkgname"
+
+  # The units are written for a manual install (~/.local/bin, /usr/local/libexec).
+  local unit
+  for unit in packaging/systemd/*.service packaging/systemd/*.timer; do
+    sed -e "s|%h/\.local/bin/$_pkgname|/usr/bin/$_pkgname|g" \
+        -e "s|~/\.local/bin/$_pkgname|/usr/bin/$_pkgname|g" \
+        -e "s|/usr/local/libexec/$_pkgname/pairing-port|$_helper|g" \
+        "$unit" > "$srcdir/${unit##*/}"
+    install -Dm644 "$srcdir/${unit##*/}" "$pkgdir/usr/lib/systemd/user/${unit##*/}"
+  done
+  if grep -rnE '\.local/bin|/usr/local/libexec' "$pkgdir/usr/lib/systemd/user"; then
+    echo 'a unit still points at a manual-install path' >&2
+    return 1
+  fi
+
+  install -Dm644 packaging/$_pkgname.desktop "$pkgdir/usr/share/applications/$_pkgname.desktop"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$_pkgname/README.md"
+  install -Dm644 packaging/config.example.toml "$pkgdir/usr/share/doc/$_pkgname/config.example.toml"
+}

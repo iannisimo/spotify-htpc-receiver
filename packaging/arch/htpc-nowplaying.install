@@ -1,0 +1,25 @@
+post_install() {
+    cat <<'EOF'
+==> htpc-nowplaying: next steps (as your own user, not root)
+  1. Install Soloist (Spotify does not allow redistributing it, so it is downloaded):
+       htpc-nowplaying-install-soloist
+  2. Let your user open the pairing port without a password, then log in again:
+       sudo usermod -aG htpc-nowplaying $USER
+  3. Start Soloist and the watcher (opens the screen when you cast):
+       systemctl --user enable --now soloist.service htpc-nowplaying-watch.service
+     Optional weekly Soloist update: systemctl --user enable --now soloist-update.timer
+  More in /usr/share/doc/htpc-nowplaying/README.md
+EOF
+}
+
+post_upgrade() {
+    echo "==> htpc-nowplaying: restart to use the new version:"
+    echo "      systemctl --user restart soloist.service htpc-nowplaying-watch.service"
+}
+
+pre_remove() {
+    # Do not leave a pairing rule open in the firewall.
+    if [ -x /usr/lib/htpc-nowplaying/pairing-port ]; then
+        /usr/lib/htpc-nowplaying/pairing-port close >/dev/null 2>&1 || true
+    fi
+}

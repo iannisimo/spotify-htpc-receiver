@@ -15,7 +15,13 @@ use std::process::{Command, Stdio};
 use crate::config::{Config, PairingMode};
 use crate::model::PlayerEvent;
 
-pub const HELPER: &str = "/usr/local/libexec/htpc-nowplaying/pairing-port";
+/// Where the helper is installed. Distribution packages set `HTPC_PAIRING_HELPER` at build time
+/// (the Arch package uses `/usr/lib/htpc-nowplaying/pairing-port`); the default matches
+/// `install-pairing-helper.sh`.
+pub const HELPER: &str = match option_env!("HTPC_PAIRING_HELPER") {
+    Some(path) => path,
+    None => "/usr/local/libexec/htpc-nowplaying/pairing-port",
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HelperCommand {
