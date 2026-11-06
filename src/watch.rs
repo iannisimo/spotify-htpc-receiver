@@ -1,9 +1,11 @@
 //! `htpc-nowplaying watch`: stays connected to Soloist and launches the UI when a cast starts.
 
+use std::collections::VecDeque;
 use std::io;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 
@@ -13,10 +15,53 @@ use crate::model::PlayerEvent;
 use crate::pairing::{HelperCommand, HelperStatus, Pairing};
 use crate::player;
 
+/// How a UI the watcher launched ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UiExit {
+    /// Exit code 0: it was closed.
+    Clean,
+    /// A failure exit code or a signal.
+    Crashed,
+}
+
+/// Called once, from any thread, when a launched UI exits.
+pub type OnUiExit = Box<dyn FnOnce(UiExit) + Send>;
+
 /// Starts the UI and tells whether one is running.
 pub trait Launcher {
-    fn launch_ui(&self) -> io::Result<()>;
+    fn launch_ui(&self, on_exit: OnUiExit) -> io::Result<()>;
     fn ui_running(&self) -> bool;
+}
+
+/// Wait before relaunching a crashed UI.
+pub const RELAUNCH_DELAY: Duration = Duration::from_secs(1);
+/// At most this many relaunches within [`CRASH_WINDOW`]; then the watcher waits for the next
+/// cast, so a UI that cannot start does not loop forever.
+pub const MAX_RELAUNCHES: usize = 3;
+pub const CRASH_WINDOW: Duration = Duration::from_secs(60);
+
+/// Counts relaunches after crashes, to stop a crash loop.
+#[derive(Debug, Default)]
+pub struct CrashGuard {
+    relaunches: VecDeque<Instant>,
+}
+
+impl CrashGuard {
+    /// Whether a crash at `now` may be followed by a relaunch (and counts it if so).
+    pub fn allow(&mut self, now: Instant) -> bool {
+        while self
+            .relaunches
+            .front()
+            .is_some_and(|&t| now.duration_since(t) >= CRASH_WINDOW)
+        {
+            self.relaunches.pop_front();
+        }
+        if self.relaunches.len() >= MAX_RELAUNCHES {
+            return false;
+        }
+        self.relaunches.push_back(now);
+        true
+    }
 }
 
 /// Spots the start of a cast session: it starts when the device becomes active and ends when
@@ -38,11 +83,18 @@ impl CastDetector {
         self.active = active;
         started
     }
+
+    /// Whether a cast session is going on.
+    pub fn active(&self) -> bool {
+        self.active
+    }
 }
 
 /// Watches Soloist forever (reconnecting as needed) and launches the UI at the start of each
 /// cast session, unless one is already running. A failed launch is logged; the next session
-/// tries again.
+/// tries again. If a UI it launched crashes while the cast goes on, it is launched again after
+/// [`RELAUNCH_DELAY`], at most [`MAX_RELAUNCHES`] times per [`CRASH_WINDOW`]. A UI that was
+/// closed (exit code 0) stays closed until the next cast.
 ///
 /// It also keeps the pairing port open for a Soloist started by hand (the UI may be closed):
 /// on each connection change it asks `pairing_mode` (the config file's current setting) and
@@ -65,15 +117,50 @@ pub async fn watch(
         Arc::new(unit_active),
         Arc::new(pairing_mode),
     ));
+    let (exit_tx, mut exits) = mpsc::unbounded_channel();
     let mut detector = CastDetector::default();
-    while let Some(ev) = events.recv().await {
-        if matches!(ev, PlayerEvent::Connected | PlayerEvent::Disconnected) {
-            // The worker lives as long as this loop does.
-            let _ = pairing_tx.send(ev.clone());
+    let mut crashes = CrashGuard::default();
+    let mut relaunch_at: Option<tokio::time::Instant> = None;
+    loop {
+        tokio::select! {
+            ev = events.recv() => {
+                let Some(ev) = ev else { break };
+                if matches!(ev, PlayerEvent::Connected | PlayerEvent::Disconnected) {
+                    // The worker lives as long as this loop does.
+                    let _ = pairing_tx.send(ev.clone());
+                }
+                if detector.on_event(&ev) {
+                    crashes = CrashGuard::default();
+                    relaunch_at = None;
+                    start_ui(&launcher, &exit_tx);
+                }
+                if !detector.active() {
+                    relaunch_at = None;
+                }
+            }
+            Some(exit) = exits.recv() => {
+                if exit == UiExit::Crashed && detector.active() {
+                    if crashes.allow(Instant::now()) {
+                        log::warn!("the UI crashed during a cast; relaunching it");
+                        relaunch_at = Some(tokio::time::Instant::now() + RELAUNCH_DELAY);
+                    } else {
+                        log::warn!(
+                            "the UI keeps crashing; not relaunching it until the next cast"
+                        );
+                    }
+                }
+            }
+            () = sleep_until(relaunch_at), if relaunch_at.is_some() => {
+                relaunch_at = None;
+                start_ui(&launcher, &exit_tx);
+            }
         }
-        if detector.on_event(&ev) {
-            start_ui(&launcher);
-        }
+    }
+}
+
+async fn sleep_until(at: Option<tokio::time::Instant>) {
+    if let Some(at) = at {
+        tokio::time::sleep_until(at).await;
     }
 }
 
@@ -107,14 +194,19 @@ async fn keep_pairing_port(
     }
 }
 
-fn start_ui(launcher: &impl Launcher) {
+fn start_ui(launcher: &impl Launcher, exits: &mpsc::UnboundedSender<UiExit>) {
     if launcher.ui_running() {
-        log::info!("cast started; the UI is already running");
+        log::info!("the UI is already running");
         return;
     }
-    match launcher.launch_ui() {
-        Ok(()) => log::info!("cast started; launched the UI"),
-        Err(e) => log::warn!("cast started but the UI could not be launched: {e}"),
+    let exits = exits.clone();
+    let on_exit: OnUiExit = Box::new(move |exit| {
+        // The watcher outlives its UIs; a send fails only while it shuts down.
+        let _ = exits.send(exit);
+    });
+    match launcher.launch_ui(on_exit) {
+        Ok(()) => log::info!("launched the UI"),
+        Err(e) => log::warn!("the UI could not be launched: {e}"),
     }
 }
 
@@ -136,18 +228,28 @@ impl ProcessLauncher {
 }
 
 impl Launcher for ProcessLauncher {
-    fn launch_ui(&self) -> io::Result<()> {
+    fn launch_ui(&self, on_exit: OnUiExit) -> io::Result<()> {
         let mut child = Command::new(&self.exe)
             .arg("run")
             .stdin(Stdio::null())
             .spawn()?;
-        // Reap it when it exits, so no zombie is left behind.
+        // Reap it when it exits, so no zombie is left behind, and report how it ended.
         std::thread::Builder::new()
             .name("ui-reaper".to_owned())
-            .spawn(move || match child.wait() {
-                Ok(status) if !status.success() => log::warn!("the UI exited with {status}"),
-                Ok(_) => {}
-                Err(e) => log::warn!("cannot wait for the UI: {e}"),
+            .spawn(move || {
+                let exit = match child.wait() {
+                    Ok(status) if status.success() => UiExit::Clean,
+                    Ok(status) => {
+                        log::warn!("the UI exited with {status}");
+                        UiExit::Crashed
+                    }
+                    Err(e) => {
+                        // Its fate is unknown: do not relaunch on a guess.
+                        log::warn!("cannot wait for the UI: {e}");
+                        UiExit::Clean
+                    }
+                };
+                on_exit(exit);
             })?;
         Ok(())
     }
@@ -259,5 +361,18 @@ mod tests {
             ],
         );
         assert_eq!(seen, [true, false, false, false]);
+    }
+
+    #[test]
+    fn crash_guard_allows_three_relaunches_a_minute() {
+        let mut guard = CrashGuard::default();
+        let t = Instant::now();
+        let s = Duration::from_secs;
+        assert!(guard.allow(t));
+        assert!(guard.allow(t + s(1)));
+        assert!(guard.allow(t + s(2)));
+        assert!(!guard.allow(t + s(3)), "a crash loop");
+        assert!(!guard.allow(t + s(59)));
+        assert!(guard.allow(t + CRASH_WINDOW), "the first one has aged out");
     }
 }

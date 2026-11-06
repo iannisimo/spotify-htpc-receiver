@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use common::{FakeSoloist, WAIT, Ws, fixture, send_text};
 use htpc_nowplaying::config::{Config, DaemonConfig, PairingMode};
 use htpc_nowplaying::pairing::{HelperCommand, HelperStatus};
-use htpc_nowplaying::watch::{Launcher, watch};
+use htpc_nowplaying::watch::{Launcher, MAX_RELAUNCHES, OnUiExit, RELAUNCH_DELAY, UiExit, watch};
 use tokio::task::JoinHandle;
 
 const INACTIVE_AUTH: &str =
@@ -24,6 +24,8 @@ struct State {
     fail: bool,
     launches: u32,
     checks: u32,
+    /// How to report the running UI's exit.
+    on_exit: Option<OnUiExit>,
 }
 
 #[derive(Clone, Default)]
@@ -33,16 +35,27 @@ impl FakeLauncher {
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
         self.0.lock().unwrap()
     }
+
+    /// The running UI exits.
+    fn exit(&self, how: UiExit) {
+        let on_exit = {
+            let mut s = self.state();
+            s.running = false;
+            s.on_exit.take().expect("a UI is running")
+        };
+        on_exit(how);
+    }
 }
 
 impl Launcher for FakeLauncher {
-    fn launch_ui(&self) -> io::Result<()> {
+    fn launch_ui(&self, on_exit: OnUiExit) -> io::Result<()> {
         let mut s = self.state();
         s.launches += 1;
         if s.fail {
             return Err(io::Error::other("no display"));
         }
         s.running = true;
+        s.on_exit = Some(on_exit);
         Ok(())
     }
 
@@ -201,12 +214,82 @@ async fn does_not_relaunch_within_same_session() {
     until("a launch", || launcher.state().launches == 1).await;
 
     // The user closes the UI; the cast goes on (pause, resume, next track).
-    launcher.state().running = false;
+    launcher.exit(UiExit::Clean);
     send_text(&mut ws, &fixture("playback_changed_paused.json")).await;
     cast(&mut ws).await;
     send_text(&mut ws, &fixture("track_changed.json")).await;
-    tokio::time::sleep(SETTLE).await;
+    tokio::time::sleep(RELAUNCH_DELAY + SETTLE).await;
     assert_eq!(launcher.state().launches, 1);
+    task.abort();
+}
+
+#[tokio::test]
+async fn relaunches_after_a_crash_during_the_cast() {
+    let launcher = FakeLauncher::default();
+    let (_fake, mut ws, task) = idle_watcher(&launcher).await;
+    cast(&mut ws).await;
+    until("a launch", || launcher.state().launches == 1).await;
+
+    launcher.exit(UiExit::Crashed);
+    tokio::time::sleep(RELAUNCH_DELAY / 2).await;
+    assert_eq!(launcher.state().launches, 1, "waits a moment first");
+    until("the relaunch", || launcher.state().launches == 2).await;
+    assert!(launcher.state().running);
+    task.abort();
+}
+
+#[tokio::test]
+async fn a_crash_after_the_cast_ended_is_not_relaunched() {
+    let launcher = FakeLauncher::default();
+    let (_fake, mut ws, task) = idle_watcher(&launcher).await;
+    cast(&mut ws).await;
+    until("a launch", || launcher.state().launches == 1).await;
+
+    end_session(&mut ws).await;
+    tokio::time::sleep(SETTLE).await;
+    launcher.exit(UiExit::Crashed);
+    tokio::time::sleep(RELAUNCH_DELAY + SETTLE).await;
+    assert_eq!(launcher.state().launches, 1);
+    task.abort();
+}
+
+#[tokio::test]
+async fn the_cast_ending_cancels_a_pending_relaunch() {
+    let launcher = FakeLauncher::default();
+    let (_fake, mut ws, task) = idle_watcher(&launcher).await;
+    cast(&mut ws).await;
+    until("a launch", || launcher.state().launches == 1).await;
+
+    launcher.exit(UiExit::Crashed);
+    end_session(&mut ws).await;
+    tokio::time::sleep(RELAUNCH_DELAY + SETTLE).await;
+    assert_eq!(launcher.state().launches, 1);
+    task.abort();
+}
+
+#[tokio::test]
+async fn stops_relaunching_a_ui_that_keeps_crashing() {
+    let launcher = FakeLauncher::default();
+    let (_fake, mut ws, task) = idle_watcher(&launcher).await;
+    cast(&mut ws).await;
+    until("a launch", || launcher.state().launches == 1).await;
+
+    let max = u32::try_from(MAX_RELAUNCHES).unwrap();
+    for n in 1..=max {
+        launcher.exit(UiExit::Crashed);
+        until("a relaunch", || launcher.state().launches == 1 + n).await;
+    }
+    launcher.exit(UiExit::Crashed);
+    tokio::time::sleep(RELAUNCH_DELAY + SETTLE).await;
+    assert_eq!(launcher.state().launches, 1 + max, "gave up");
+
+    // The next cast starts afresh.
+    end_session(&mut ws).await;
+    cast(&mut ws).await;
+    until("the next cast's launch", || {
+        launcher.state().launches == 2 + max
+    })
+    .await;
     task.abort();
 }
 
@@ -217,7 +300,7 @@ async fn launches_again_after_session_ended_and_new_cast() {
     cast(&mut ws).await;
     until("a launch", || launcher.state().launches == 1).await;
 
-    launcher.state().running = false;
+    launcher.exit(UiExit::Clean);
     end_session(&mut ws).await;
     cast(&mut ws).await;
     until("a second launch", || launcher.state().launches == 2).await;

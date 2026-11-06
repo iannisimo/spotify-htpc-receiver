@@ -166,7 +166,9 @@ systemctl --user enable --now htpc-nowplaying-watch.service
 ```
 
 The watcher opens the now-playing screen when you pick the device in Spotify. It opens it once per
-cast: close it and it stays closed until you cast again. It needs to run inside your
+cast: close it and it stays closed until you cast again. If it crashes while you are casting,
+the watcher opens it again a second later (up to three times a minute; after that it waits
+for the next cast). It needs to run inside your
 graphical session; `systemctl --user show-environment | grep DISPLAY` must list
 `WAYLAND_DISPLAY` or `DISPLAY` (session managers such as uwsm set this up). You can also start
 the UI yourself from the app menu or with `htpc-nowplaying run`. Only one UI runs at a time.
