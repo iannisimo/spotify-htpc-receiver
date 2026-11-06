@@ -121,20 +121,6 @@ pub fn service_active() -> bool {
         .is_ok_and(|status| status.success())
 }
 
-/// Restarts the Soloist user unit. Blocking; call it off the UI thread.
-pub fn restart_service() -> Result<(), String> {
-    let output = Command::new("systemctl")
-        .args(["--user", "restart", UNIT])
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| e.to_string())?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(String::from_utf8_lossy(&output.stderr).trim().to_owned())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
