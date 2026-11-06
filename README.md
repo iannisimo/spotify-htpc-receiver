@@ -40,18 +40,21 @@ makepkg -si
 
 It installs the app, the pairing helper with its sudoers rule, the systemd user units and
 `htpc-nowplaying-install-soloist`. Soloist itself cannot be redistributed, so it is not in the
-package. Then, as your own user:
+package: `soloist.service` downloads it from Spotify into `~/.local/opt/soloist` on its first
+start, and a weekly timer, started along with it, keeps it updated. Then, as your own user:
 
 ```sh
-htpc-nowplaying-install-soloist              # downloads Soloist, asks for the API key
-sudo usermod -aG htpc-nowplaying $USER       # pairing without a password; log in again
+# Your Soloist API key (needs Premium; create one at https://developer.spotify.com/dashboard/soloist)
+mkdir -p ~/.config/soloist && (umask 077 && printf '%s' 'YOUR-KEY' > ~/.config/soloist/api-key)
+sudo usermod -aG htpc-nowplaying $USER       # pairing without a password; then reboot
 systemctl --user enable --now soloist.service htpc-nowplaying-watch.service
-systemctl --user enable --now soloist-update.timer   # optional: weekly Soloist update
 ```
 
 Membership of the `htpc-nowplaying` group lets you run the pairing helper (and only its
-`open`, `close` and `status`) as root without a password. Skip the rest of this section; the
-steps below are for other distributions. "Pairing" and "Using it" apply to both.
+`open`, `close` and `status`) as root without a password. Reboot after joining it: a logout
+is often not enough, because the systemd user manager that starts the app keeps the groups it
+started with. Skip the rest of this section; the steps below are for other distributions.
+"Pairing" and "Using it" apply to both.
 
 ### 1. Build the app
 

@@ -8,19 +8,38 @@
 # files and restarts soloist.service if it is running or failed. The Soloist unit and the
 # weekly soloist-update.timer run it for you (see the README).
 #
-# usage: install-soloist.sh [--update] [install-dir]
+# --if-missing does nothing when Soloist is installed, and otherwise installs it like
+# --update but never restarts anything: soloist.service runs it before each start, so the
+# first start downloads Soloist by itself.
+#
+# usage: install-soloist.sh [--update | --if-missing] [install-dir]
 set -eu
 
+# update=1: no questions, and a same build is left alone. restart=1: restart the service after.
 update=0
-if [ "${1:-}" = "--update" ]; then
-    update=1
-    shift
-fi
+restart=0
+if_missing=0
+case "${1:-}" in
+    --update)
+        update=1
+        restart=1
+        shift
+        ;;
+    --if-missing)
+        update=1
+        if_missing=1
+        shift
+        ;;
+esac
 
 default_dest="$HOME/.local/opt/soloist"
 dest="${1:-$default_dest}"
 key_file="${XDG_CONFIG_HOME:-$HOME/.config}/soloist/api-key"
 hash_file="$dest/.tarball.sha256"
+
+if [ "$if_missing" = 1 ] && [ -x "$dest/soloist" ]; then
+    exit 0
+fi
 
 case "$(uname -m)" in
     x86_64 | amd64) arch=x86_64 ;;
@@ -84,10 +103,15 @@ fi
 
 version="$("$dest/soloist" --version 2>/dev/null || true)"
 
+if [ "$if_missing" = 1 ]; then
+    echo "Installed Soloist ${version:-} to $dest"
+    exit 0
+fi
+
 if [ "$update" = 1 ]; then
     # The new build only runs once the service restarts. A stopped service stays stopped; an
     # expired one has failed, and starting it again is the point.
-    if command -v systemctl >/dev/null 2>&1 &&
+    if [ "$restart" = 1 ] && command -v systemctl >/dev/null 2>&1 &&
         { systemctl --user is-active --quiet soloist.service ||
             systemctl --user is-failed --quiet soloist.service; }; then
         systemctl --user restart soloist.service

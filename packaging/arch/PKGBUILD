@@ -82,16 +82,18 @@ package() {
   install -dm750 "$pkgdir/etc/sudoers.d"
   install -m440 packaging/arch/$_pkgname.sudoers "$pkgdir/etc/sudoers.d/$_pkgname"
 
-  # The units are written for a manual install (~/.local/bin, /usr/local/libexec).
+  # The units are written for a manual install (~/.local/bin, /usr/local/libexec, and the
+  # installer's copy in ~/.local/opt/soloist). Soloist itself stays in ~/.local/opt/soloist.
   local unit
   for unit in packaging/systemd/*.service packaging/systemd/*.timer; do
     sed -e "s|%h/\.local/bin/$_pkgname|/usr/bin/$_pkgname|g" \
         -e "s|~/\.local/bin/$_pkgname|/usr/bin/$_pkgname|g" \
         -e "s|/usr/local/libexec/$_pkgname/pairing-port|$_helper|g" \
+        -e "s|%h/\.local/opt/soloist/install-soloist\.sh|/usr/bin/$_pkgname-install-soloist|g" \
         "$unit" > "$srcdir/${unit##*/}"
     install -Dm644 "$srcdir/${unit##*/}" "$pkgdir/usr/lib/systemd/user/${unit##*/}"
   done
-  if grep -rnE '\.local/bin|/usr/local/libexec' "$pkgdir/usr/lib/systemd/user"; then
+  if grep -rnE '\.local/bin|/usr/local/libexec|^Exec.*install-soloist\.sh' "$pkgdir/usr/lib/systemd/user"; then
     echo 'a unit still points at a manual-install path' >&2
     return 1
   fi

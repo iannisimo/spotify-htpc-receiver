@@ -232,6 +232,44 @@ fn update_never_prompts() {
 }
 
 #[test]
+fn if_missing_downloads_when_absent() {
+    // soloist.service's first start after installing the package.
+    let s = Setup::new("if-missing-absent");
+    s.marker("active");
+    let out = s.run(&["--if-missing"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(s.installed_version(), "soloist 1.0");
+    let all = format!("{}{}", text(&out), String::from_utf8_lossy(&out.stderr));
+    assert!(!all.to_lowercase().contains("key"), "never prompts: {all}");
+    assert!(
+        !s.systemctl_log().contains("restart"),
+        "it runs while the unit starts: {}",
+        s.systemctl_log()
+    );
+}
+
+#[test]
+fn if_missing_does_nothing_when_present() {
+    let s = Setup::new("if-missing-present");
+    assert!(s.run(&[]).status.success());
+    s.tarball("2.0");
+    s.marker("curl-fails"); // a download would fail the run
+    s.marker("active");
+    let out = s.run(&["--if-missing"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(s.installed_version(), "soloist 1.0", "not updated");
+    assert!(!s.systemctl_log().contains("restart"));
+}
+
+#[test]
 fn update_download_failure_keeps_files() {
     let s = Setup::new("offline");
     assert!(s.run(&[]).status.success());

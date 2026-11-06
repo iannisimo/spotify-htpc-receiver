@@ -15,13 +15,18 @@
 Description=Spotify Soloist (Spotify Connect speaker)
 Documentation=https://developer.spotify.com/documentation/soloist
 After=pipewire.service wireplumber.service
-Wants=pipewire.service
+# The weekly update runs whenever Soloist does (no need to enable the timer separately).
+Wants=pipewire.service soloist-update.timer
 
 [Service]
 # Pairing (see the README, "Pairing"): the firewall port Soloist listens on is opened for the
 # local network while Soloist runs with `pairing = "on"`, and closed when it stops. All three
 # lines start with "-" so a missing pairing helper never keeps Soloist from running.
 ExecStartPre=-/usr/bin/sudo -n /usr/local/libexec/htpc-nowplaying/pairing-port close
+# Downloads Soloist from Spotify if it is not installed yet (the first start, or after it was
+# removed). Without network this fails, and Restart= tries again.
+ExecStartPre=%h/.local/opt/soloist/install-soloist.sh --if-missing
+TimeoutStartSec=5min
 ExecStart=%h/.local/bin/htpc-nowplaying soloist
 ExecStartPost=-%h/.local/bin/htpc-nowplaying pairing-sync
 ExecStopPost=-/usr/bin/sudo -n /usr/local/libexec/htpc-nowplaying/pairing-port close
