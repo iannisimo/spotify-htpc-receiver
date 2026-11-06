@@ -5,7 +5,7 @@
 
 pkgname=htpc-nowplaying-git
 _pkgname=htpc-nowplaying
-pkgver=0.1.0.r0.g0000000
+pkgver=0.1.0.r33.gfce9fa5
 pkgrel=1
 pkgdesc='Spotify Connect speaker for an HTPC: now-playing screen and projectM visualizer driven by a TV remote'
 arch=('x86_64' 'aarch64')
@@ -30,7 +30,8 @@ conflicts=("$_pkgname")
 backup=("etc/sudoers.d/$_pkgname")
 # makepkg's LTO flags break linking the C library aws-lc that rustls builds (undefined
 # aws_lc_* symbols).
-options=('!lto')
+# Cargo strips debug info from release builds, so a -debug package would be empty.
+options=('!lto' '!debug')
 install="$_pkgname.install"
 source=("$_pkgname::git+$url.git")
 sha256sums=('SKIP')
