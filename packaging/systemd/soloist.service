@@ -1,0 +1,27 @@
+# Spotify Soloist as a user service: the Spotify Connect speaker that htpc-nowplaying shows.
+# Install: packaging/install-soloist.sh, then
+#   cp packaging/systemd/soloist.service ~/.config/systemd/user/
+#   systemctl --user enable --now soloist.service
+#
+# The API key is read from ~/.config/soloist/api-key (mode 600). Soloist only accepts it on
+# the command line, so other local users can see it in the process list; on a shared machine,
+# keep that in mind.
+
+[Unit]
+Description=Spotify Soloist (Spotify Connect speaker)
+Documentation=https://developer.spotify.com/documentation/soloist
+After=pipewire.service wireplumber.service
+Wants=pipewire.service
+
+[Service]
+# --device-name is what Spotify lists; change HTPC to taste. --ws must match `daemon.address`
+# in htpc-nowplaying's config and stay on 127.0.0.1 (the WebSocket has no authentication).
+ExecStart=/bin/sh -c 'exec "%h/.local/opt/soloist/soloist" --device-name HTPC --ws 127.0.0.1:9090 --api-key "$$(cat "%h/.config/soloist/api-key")"'
+Restart=on-failure
+RestartSec=5
+# Exit code 10 means this Soloist build has expired (builds last 90 days). Restarting cannot
+# help: run install-soloist.sh again to update, then restart the service.
+RestartPreventExitStatus=10
+
+[Install]
+WantedBy=default.target

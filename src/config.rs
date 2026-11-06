@@ -561,6 +561,32 @@ mod tests {
         );
     }
 
+    /// The shipped example lists every setting commented out with its default. Uncommented,
+    /// it must parse cleanly and give exactly the defaults (preset_dir aside, which has none).
+    #[test]
+    fn example_config_documents_the_defaults() {
+        let example = include_str!("../packaging/config.example.toml");
+        let uncommented: String = example
+            .lines()
+            .map(|line| match line.strip_prefix("# ") {
+                Some(rest) if rest.contains(" = ") && !rest.contains(':') => rest,
+                _ => line,
+            })
+            .map(|line| format!("{line}\n"))
+            .collect();
+        // 3 top-level, 1 daemon, 12 visualizer, 7 default keys: a new setting belongs here too.
+        let settings = uncommented.lines().filter(|l| l.contains(" = ")).count();
+        assert_eq!(settings, 23);
+
+        let (mut cfg, warnings) = parse_with_home(&uncommented, Some(Path::new("/home/me")));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(
+            cfg.visualizer.preset_dir.take(),
+            Some(PathBuf::from("/home/me/.local/share/projectM/presets"))
+        );
+        assert_eq!(cfg, Config::default());
+    }
+
     #[test]
     fn xdg_config_home_respected() {
         let path = default_path_from(

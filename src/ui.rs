@@ -148,6 +148,8 @@ fn install_renderer(app: &App, controller: &Rc<RefCell<Controller>>) {
                 }
             }
             RenderingState::RenderingTeardown => drop(s.gl_lost()),
+            // For checking the idle cost: `RUST_LOG=htpc_nowplaying::ui=trace` logs each frame.
+            RenderingState::AfterRendering => log::trace!("frame drawn"),
             _ => {}
         }
     });

@@ -1,0 +1,70 @@
+# htpc-nowplaying configuration
+#
+# Copy to ~/.config/htpc-nowplaying/config.toml (or $XDG_CONFIG_HOME/htpc-nowplaying/).
+# Every setting is optional; the values shown are the defaults. Mistakes never stop the app:
+# an invalid file, unknown key or out-of-range value is logged and the default is used.
+
+# Ask the compositor for a fullscreen window. Set to false for a normal window.
+# fullscreen = true
+
+# Up/Down change Spotify's volume on the now-playing screen.
+# audio_controls = false
+
+# Volume change per Up/Down press, in percent (1-25).
+# volume_step = 5
+
+[daemon]
+# Soloist's WebSocket address, as passed to its --ws flag. Keep it on 127.0.0.1: the
+# WebSocket has no authentication.
+# address = "127.0.0.1:9090"
+
+[visualizer]
+# Folder of Milkdrop .milk presets, searched recursively. Without it the app looks in
+# ~/.local/share/projectM/presets, then /usr/local/share/projectM/presets and
+# /usr/share/projectM/presets (following $XDG_DATA_HOME and $XDG_DATA_DIRS).
+# preset_dir = "~/.local/share/projectM/presets"
+
+# Seconds before moving on to the next preset (1-3600), unless the preset is locked (OK).
+# preset_duration_s = 30.0
+
+# Play presets in random order (each once per pass) instead of alphabetically.
+# shuffle = true
+
+# Allow hard cuts: an instant preset change on a strong beat.
+# hard_cuts = false
+
+# Length of the blend between presets, in seconds (0-60).
+# soft_cut_s = 3.0
+
+# Mesh size: more is finer motion and more CPU (8-512 each).
+# mesh_width = 48
+# mesh_height = 32
+
+# Frame rate cap (10-240).
+# fps_cap = 60
+
+# How far adaptive quality may go on a slow machine: render scale (0.1-1.0) and frame rate
+# (5 up to fps_cap). The mesh drops to at most half its size.
+# min_scale = 0.5
+# min_fps = 30
+
+# How strongly the visuals react to beats (0.0-5.0); Up/Down change it while watching.
+# beat_sensitivity = 1.0
+
+# Milliseconds to hold the audio back so the visuals match what you hear (0-2000).
+# TVs over HDMI and Bluetooth speakers often need 100-300. Measure it, or tune by eye.
+# delay_ms = 0
+
+[keys]
+# Maps the keys your remote sends to its buttons: left, right, up, down, ok, back, or none to
+# unbind. Key names are as `wev` shows them: arrows, Return, Escape, BackSpace, Tab, space,
+# Delete, Insert, Home, End, Page_Up, Page_Down, Menu, Pause, F1-F24 or a printable
+# character. Media keys and a dedicated Back key (XF86Back) never reach the app, so a remote's
+# Back button must send Escape or BackSpace. Entries here add to or replace the defaults.
+# Left = "left"
+# Right = "right"
+# Up = "up"
+# Down = "down"
+# Return = "ok"
+# Escape = "back"
+# BackSpace = "back"

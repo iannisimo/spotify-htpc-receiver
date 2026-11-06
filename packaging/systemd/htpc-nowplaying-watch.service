@@ -1,0 +1,23 @@
+# Opens the now-playing screen when something is cast to this device.
+# Install:
+#   cp packaging/systemd/htpc-nowplaying-watch.service ~/.config/systemd/user/
+#   systemctl --user enable --now htpc-nowplaying-watch.service
+#
+# The UI is started as a child of this service and inherits its environment, so the service
+# must run inside the graphical session: it needs WAYLAND_DISPLAY (or DISPLAY) in the user
+# manager's environment, which session managers such as uwsm import. Check with
+#   systemctl --user show-environment | grep DISPLAY
+# Stopping this service also closes a UI it opened.
+
+[Unit]
+Description=Open htpc-nowplaying when a Spotify cast starts
+PartOf=graphical-session.target
+After=graphical-session.target soloist.service
+
+[Service]
+ExecStart=%h/.local/bin/htpc-nowplaying watch
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

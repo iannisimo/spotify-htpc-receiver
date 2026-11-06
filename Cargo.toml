@@ -2,6 +2,8 @@
 name = "htpc-nowplaying"
 version = "0.1.0"
 edition = "2024"
+# Slint 1.18 needs 1.92.
+rust-version = "1.92"
 
 [dependencies]
 clap = { version = "4.6", features = ["derive"] }

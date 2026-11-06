@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=HTPC Now Playing
+Comment=Spotify Connect now-playing screen and visualizer
+Exec=htpc-nowplaying run
+Icon=multimedia-audio-player
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+Keywords=Spotify;Soloist;Visualizer;projectM;
