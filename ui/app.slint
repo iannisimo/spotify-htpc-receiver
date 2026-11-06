@@ -523,6 +523,7 @@ export component App inherits Window {
         }
 
         VerticalLayout {
+            alignment: start;
             padding: 40px * root.s;
             spacing: 12px * root.s;
 
@@ -537,6 +538,7 @@ export component App inherits Window {
             }
 
             if root.settings-view == 0: settings-list := VerticalLayout {
+                alignment: start;
                 spacing: 6px * root.s;
                 for row in root.settings-rows: PanelRow {
                     s: root.s;
@@ -556,6 +558,7 @@ export component App inherits Window {
             }
 
             if root.settings-view == 1: calibrate-view := VerticalLayout {
+                alignment: start;
                 spacing: 28px * root.s;
                 calib-flash-box := Rectangle {
                     height: 220px * root.s;
@@ -585,6 +588,7 @@ export component App inherits Window {
             }
 
             if root.settings-view == 2: presets-view := VerticalLayout {
+                alignment: start;
                 spacing: 2px * root.s;
                 for entry in root.tree-rows: TreeRowView {
                     s: root.s;
@@ -593,23 +597,27 @@ export component App inherits Window {
                 Rectangle {
                     height: 16px * root.s;
                 }
-                tree-summary-text := Text {
-                    text: root.tree-summary;
-                    font-size: 28px * root.s;
-                    color: Theme.dim;
-                    wrap: word-wrap;
-                }
-                if root.tree-note != "": tree-note-text := Text {
-                    text: root.tree-note;
-                    font-size: 26px * root.s;
-                    color: Theme.faint;
-                    wrap: word-wrap;
-                }
-                Text {
-                    text: "OK switches on or off. Right: open a folder, or try a preset. Back when done.";
-                    font-size: 24px * root.s;
-                    color: Theme.faint;
-                    wrap: word-wrap;
+                VerticalLayout {
+                    alignment: start;
+                    spacing: 10px * root.s;
+                    tree-summary-text := Text {
+                        text: root.tree-summary;
+                        font-size: 28px * root.s;
+                        color: Theme.dim;
+                        wrap: word-wrap;
+                    }
+                    if root.tree-note != "": tree-note-text := Text {
+                        text: root.tree-note;
+                        font-size: 26px * root.s;
+                        color: Theme.faint;
+                        wrap: word-wrap;
+                    }
+                    Text {
+                        text: "OK switches on or off. Right: open a folder, or try a preset. Back when done.";
+                        font-size: 24px * root.s;
+                        color: Theme.faint;
+                        wrap: word-wrap;
+                    }
                 }
             }
         }
