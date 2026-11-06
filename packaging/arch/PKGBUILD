@@ -28,6 +28,9 @@ optdepends=(
 provides=("$_pkgname")
 conflicts=("$_pkgname")
 backup=("etc/sudoers.d/$_pkgname")
+# makepkg's LTO flags break linking the C library aws-lc that rustls builds (undefined
+# aws_lc_* symbols).
+options=('!lto')
 install="$_pkgname.install"
 source=("$_pkgname::git+$url.git")
 sha256sums=('SKIP')
@@ -60,7 +63,8 @@ check() {
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR=target
   export HTPC_PAIRING_HELPER=$_helper
-  cargo test --frozen --release
+  # A debug build: the UI tests need the debug info Slint only emits there.
+  cargo test --frozen
   sh -n packaging/pairing-port
   visudo -cf packaging/arch/$_pkgname.sudoers
 }

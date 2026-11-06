@@ -28,6 +28,31 @@ what plays on your phone.
 
 ## Install
 
+### On Arch Linux
+
+`packaging/arch/PKGBUILD` builds `htpc-nowplaying-git` from this repository's `master` on
+GitHub:
+
+```sh
+cd packaging/arch
+makepkg -si
+```
+
+It installs the app, the pairing helper with its sudoers rule, the systemd user units and
+`htpc-nowplaying-install-soloist`. Soloist itself cannot be redistributed, so it is not in the
+package. Then, as your own user:
+
+```sh
+htpc-nowplaying-install-soloist              # downloads Soloist, asks for the API key
+sudo usermod -aG htpc-nowplaying $USER       # pairing without a password; log in again
+systemctl --user enable --now soloist.service htpc-nowplaying-watch.service
+systemctl --user enable --now soloist-update.timer   # optional: weekly Soloist update
+```
+
+Membership of the `htpc-nowplaying` group lets you run the pairing helper (and only its
+`open`, `close` and `status`) as root without a password. Skip the rest of this section; the
+steps below are for other distributions. "Pairing" and "Using it" apply to both.
+
 ### 1. Build the app
 
 Build requirements: Rust 1.92 or newer, `pkg-config`, `clang` (for the PipeWire bindings), and
