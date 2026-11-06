@@ -4,9 +4,11 @@
 //! notifier), from [`Visualizer::new`] to the drop.
 
 pub mod adaptive;
+pub mod disabled;
 mod gl;
 pub mod presets;
 mod projectm;
+pub mod tree;
 
 use std::cell::Cell;
 use std::ffi::{CStr, CString, c_char, c_uint, c_void};
