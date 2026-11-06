@@ -1,0 +1,13 @@
+# Downloads the current Soloist build and, if it changed, installs it and restarts Soloist.
+# Started weekly by soloist-update.timer, and by soloist.service when a build has expired.
+# Install: see the README ("Install Soloist"). Needs ~/.local/opt/soloist/install-soloist.sh,
+# which install-soloist.sh puts there.
+
+[Unit]
+Description=Update Spotify Soloist
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/opt/soloist/install-soloist.sh --update

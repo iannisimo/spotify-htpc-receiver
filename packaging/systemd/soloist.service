@@ -25,10 +25,14 @@ ExecStartPre=-/usr/bin/sudo -n /usr/local/libexec/htpc-nowplaying/pairing-port c
 ExecStart=%h/.local/bin/htpc-nowplaying soloist
 ExecStartPost=-%h/.local/bin/htpc-nowplaying pairing-sync
 ExecStopPost=-/usr/bin/sudo -n /usr/local/libexec/htpc-nowplaying/pairing-port close
+# Exit code 10 means this Soloist build has expired (builds last 90 days). Restarting cannot
+# help, so the service stays stopped and this starts the update (soloist-update.service, see
+# the README), whose restart brings Soloist back. Without that unit installed it is harmless:
+# run install-soloist.sh --update by hand. This works because `htpc-nowplaying soloist`
+# replaces itself with Soloist, so its exit code reaches systemd unchanged.
+ExecStopPost=/bin/sh -c '[ "$$EXIT_STATUS" = 10 ] && systemctl --user --no-block start soloist-update.service || true'
 Restart=on-failure
 RestartSec=5
-# Exit code 10 means this Soloist build has expired (builds last 90 days). Restarting cannot
-# help: run install-soloist.sh again to update, then restart the service.
 RestartPreventExitStatus=10
 
 [Install]

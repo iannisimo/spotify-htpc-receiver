@@ -1,0 +1,16 @@
+# Checks for a new Soloist build every week (builds expire after 90 days).
+# Install:
+#   cp packaging/systemd/soloist-update.{service,timer} ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now soloist-update.timer
+
+[Unit]
+Description=Weekly Spotify Soloist update
+
+[Timer]
+OnCalendar=weekly
+Persistent=true
+RandomizedDelaySec=1h
+
+[Install]
+WantedBy=timers.target

@@ -13,6 +13,8 @@
 Description=Open htpc-nowplaying when a Spotify cast starts
 PartOf=graphical-session.target
 After=graphical-session.target soloist.service
+# Pulls Soloist in, so there is something to watch. The watcher never starts Soloist itself.
+Wants=soloist.service
 
 [Service]
 ExecStart=%h/.local/bin/htpc-nowplaying watch

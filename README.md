@@ -65,6 +65,18 @@ systemctl --user daemon-reload
 systemctl --user enable --now soloist.service
 ```
 
+**Keeping Soloist current (optional).** Builds expire after 90 days, so a weekly check is
+worth having. The installer leaves a copy of itself in `~/.local/opt/soloist`, and a timer
+runs it with `--update`: it downloads the current build, does nothing if it is the same, and
+otherwise installs it and restarts Soloist if that was running:
+
+```sh
+cp packaging/systemd/soloist-update.service packaging/systemd/soloist-update.timer \
+    ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now soloist-update.timer
+```
+
 The device appears in Spotify as **soloist-&lt;hostname&gt;** (for example `soloist-htpc`). To
 use another name, set `device_name` under `[daemon]` in `config.toml` (1–32 letters, digits,
 space and `- _ . '`), then `systemctl --user restart soloist.service`. The settings panel has
@@ -134,6 +146,8 @@ graphical session; `systemctl --user show-environment | grep DISPLAY` must list
 `WAYLAND_DISPLAY` or `DISPLAY` (session managers such as uwsm set this up). You can also start
 the UI yourself from the app menu or with `htpc-nowplaying run`. Only one UI runs at a time.
 
+The watcher unit pulls in `soloist.service` (it never starts Soloist by any other means).
+
 If you run Soloist by hand and Pairing is on, the watcher also reopens the pairing port each
 time Soloist (re)starts, even with the UI closed. When the Soloist unit runs it, the unit does
 that itself.
@@ -199,8 +213,11 @@ or raise `delay_ms` until beats and visuals line up, in steps of about 20.
 ## Soloist things to know
 
 - **Builds expire after 90 days.** An expired Soloist exits with code 10; the service then
-  stays stopped and the UI shows "Can't reach Soloist". Update with
-  `packaging/install-soloist.sh`, then `systemctl --user restart soloist`.
+  stays stopped and the UI shows "Can't reach Soloist". With `soloist-update.service` and
+  its timer installed (see "Install Soloist"), the service starts the update itself when a
+  build expires, and the update's restart brings Soloist back. Without them, update by hand
+  with `packaging/install-soloist.sh --update`, which also restarts a running or failed
+  Soloist.
 - **The API key is visible to other local users** in the process list (`ps`), because Soloist
   only accepts it as a command-line argument. On a machine with other users, keep that in mind.
 - **VPNs (Tailscale and others):** Soloist may announce itself on the LAN with the VPN address.

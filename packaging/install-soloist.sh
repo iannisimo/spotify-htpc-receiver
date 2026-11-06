@@ -2,14 +2,25 @@
 # Downloads Spotify Soloist from Spotify's own servers into ~/.local/opt/soloist. Soloist may
 # not be redistributed, so it is never bundled with htpc-nowplaying.
 #
-# Also the way to update: Soloist builds expire after 90 days (it then exits with code 10).
-# Run this again, then: systemctl --user restart soloist.service
+# Soloist builds expire after 90 days (it then exits with code 10). To update:
+#   packaging/install-soloist.sh --update
+# which downloads again, does nothing if the build is the same, and otherwise replaces the
+# files and restarts soloist.service if it is running or failed. The Soloist unit and the
+# weekly soloist-update.timer run it for you (see the README).
 #
-# usage: packaging/install-soloist.sh [install-dir]
+# usage: install-soloist.sh [--update] [install-dir]
 set -eu
 
-dest="${1:-$HOME/.local/opt/soloist}"
+update=0
+if [ "${1:-}" = "--update" ]; then
+    update=1
+    shift
+fi
+
+default_dest="$HOME/.local/opt/soloist"
+dest="${1:-$default_dest}"
 key_file="${XDG_CONFIG_HOME:-$HOME/.config}/soloist/api-key"
+hash_file="$dest/.tarball.sha256"
 
 case "$(uname -m)" in
     x86_64 | amd64) arch=x86_64 ;;
@@ -27,12 +38,29 @@ trap 'rm -rf "$tmp"' EXIT
 
 echo "Downloading $url"
 if command -v curl >/dev/null 2>&1; then
-    curl --fail --location --silent --show-error --output "$tmp/soloist.tar.gz" "$url"
+    curl --fail --location --silent --show-error --output "$tmp/soloist.tar.gz" "$url" || {
+        echo "install-soloist: the download failed; nothing was changed" >&2
+        exit 1
+    }
 elif command -v wget >/dev/null 2>&1; then
-    wget --quiet --output-document="$tmp/soloist.tar.gz" "$url"
+    wget --quiet --output-document="$tmp/soloist.tar.gz" "$url" || {
+        echo "install-soloist: the download failed; nothing was changed" >&2
+        exit 1
+    }
 else
     echo "install-soloist: needs curl or wget" >&2
     exit 1
+fi
+
+if command -v sha256sum >/dev/null 2>&1; then
+    new_hash="$(sha256sum "$tmp/soloist.tar.gz" | cut -d ' ' -f 1)"
+else
+    new_hash="$(shasum -a 256 "$tmp/soloist.tar.gz" | cut -d ' ' -f 1)"
+fi
+
+if [ "$update" = 1 ] && [ -f "$hash_file" ] && [ "$(cat "$hash_file")" = "$new_hash" ]; then
+    echo "Soloist is up to date"
+    exit 0
 fi
 
 mkdir -p "$tmp/extract"
@@ -47,8 +75,35 @@ mkdir -p "$dest"
 for f in "$tmp"/extract/*; do
     cp -f "$f" "$dest/"
 done
+printf '%s\n' "$new_hash" >"$hash_file"
+# A copy of this script next to Soloist gives the update units a path that does not depend on
+# where the repository is. (Skipped when it is already running from there.)
+if [ ! "$0" -ef "$dest/install-soloist.sh" ]; then
+    cp -f "$0" "$dest/install-soloist.sh"
+fi
+
+version="$("$dest/soloist" --version 2>/dev/null || true)"
+
+if [ "$update" = 1 ]; then
+    # The new build only runs once the service restarts. A stopped service stays stopped; an
+    # expired one has failed, and starting it again is the point.
+    if command -v systemctl >/dev/null 2>&1 &&
+        { systemctl --user is-active --quiet soloist.service ||
+            systemctl --user is-failed --quiet soloist.service; }; then
+        systemctl --user restart soloist.service
+    fi
+    echo "Updated Soloist to ${version:-the new build}"
+    exit 0
+fi
+
 echo "Installed to $dest"
-"$dest/soloist" --version 2>/dev/null || true
+[ -n "$version" ] && echo "$version"
+if [ "$dest" != "$default_dest" ]; then
+    echo
+    echo "This is not the default folder. Tell htpc-nowplaying where Soloist is, in config.toml:"
+    echo "  [daemon]"
+    echo "  soloist_path = \"$dest/soloist\""
+fi
 
 if [ ! -s "$key_file" ]; then
     echo
