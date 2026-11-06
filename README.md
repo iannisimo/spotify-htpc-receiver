@@ -79,7 +79,11 @@ incoming connections denied (ufw's default, for example) blocks the pairing. Dis
    `sudo ufw allow from <phone-ip> to any port NNNNN proto tcp`.
 3. Open Spotify on the phone (same network) and pick HTPC.
 4. Remove the rule again. After pairing, Soloist keeps the login in `~/.local/share/soloist`
-   and the device shows up through your Spotify account, with no open port.
+   and your phone reaches it through Spotify's servers: no open port is needed, the new port
+   after a restart does not matter, and it works from anywhere, even from mobile data.
+
+If the phone and the HTPC are on the same Tailscale network, pairing also works with the phone's
+Tailscale on and no firewall rule at all, because Tailscale lets tailnet traffic in by itself.
 
 ### 4. Open the UI when you cast (optional)
 
@@ -138,15 +142,17 @@ visuals line up, in steps of about 20.
   `packaging/install-soloist.sh`, then `systemctl --user restart soloist`.
 - **The API key is visible to other local users** in the process list (`ps`), because Soloist
   only accepts it as a command-line argument. On a machine with other users, keep that in mind.
-- **VPNs (Tailscale and others):** Soloist may advertise the VPN address instead of the LAN
-  one, and then the phone cannot reach it for pairing. Pair with the VPN off.
+- **VPNs (Tailscale and others):** Soloist may announce itself on the LAN with the VPN address.
+  In our test (Tailscale on the HTPC, phone on Wi-Fi only) the phone still reached it once the
+  pairing port was open. If the device does not show up for pairing, try with the VPN off.
 - Soloist's WebSocket has no authentication. Keep it on `127.0.0.1`, as the unit does.
 
 ## Troubleshooting
 
 **HTPC is missing from Spotify's device list.** Check that Soloist runs
-(`systemctl --user status soloist`) and that the phone is on the same network. For the first
-pairing, open its port (see "Pair it once"). With a VPN up, try without it.
+(`systemctl --user status soloist`). Before the first pairing, the phone must be on the same
+network and the pairing port open (see "Pair it once"); with a VPN up, try without it. After
+pairing, the phone finds it through Spotify, from any network.
 
 **"Can't reach Soloist".** Soloist is not running, or the app looks at the wrong address. Look
 at `journalctl --user -u soloist`: exit code 10 means the build expired (see above). The app
