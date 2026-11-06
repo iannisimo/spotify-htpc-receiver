@@ -1,4 +1,5 @@
 pub mod audio;
+pub mod calibrate;
 pub mod config;
 pub mod cover;
 pub mod input;
