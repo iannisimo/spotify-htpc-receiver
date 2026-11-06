@@ -1,7 +1,8 @@
+use std::ffi::OsString;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use htpc_nowplaying::{config, instance, ui, watch};
+use htpc_nowplaying::{config, instance, soloist, ui, watch};
 
 /// Spotify Connect now-playing screen and visualizer for a dpad-controlled HTPC.
 #[derive(Parser)]
@@ -17,6 +18,12 @@ enum Command {
     Run,
     /// Wait for a cast to start and launch the UI.
     Watch,
+    /// Start Soloist with the speaker name and address from the config (for the systemd unit).
+    Soloist {
+        /// Extra arguments for Soloist, after `--` (for example `-v`).
+        #[arg(last = true)]
+        args: Vec<OsString>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -26,12 +33,15 @@ fn main() -> ExitCode {
     let default_log = match command {
         Command::Run => "warn",
         Command::Watch => "warn,htpc_nowplaying=info",
+        Command::Soloist { .. } => "warn",
     };
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default_log)).init();
     let cfg = config::load(&config::default_path());
     let result = match command {
         Command::Run => run(cfg),
         Command::Watch => run_watch(cfg),
+        // Only returns when Soloist could not be started.
+        Command::Soloist { args } => Err(soloist::exec_soloist(&cfg.daemon, &args).into()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

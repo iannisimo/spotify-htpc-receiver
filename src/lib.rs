@@ -5,6 +5,7 @@ pub mod input;
 pub mod instance;
 pub mod model;
 pub mod player;
+pub mod soloist;
 pub mod ui;
 pub mod visualizer;
 pub mod viz;

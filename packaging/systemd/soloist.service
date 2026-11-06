@@ -3,9 +3,13 @@
 #   cp packaging/systemd/soloist.service ~/.config/systemd/user/
 #   systemctl --user enable --now soloist.service
 #
-# The API key is read from ~/.config/soloist/api-key (mode 600). Soloist only accepts it on
-# the command line, so other local users can see it in the process list; on a shared machine,
-# keep that in mind.
+# `htpc-nowplaying soloist` starts Soloist (it replaces itself with it, so an exit code of 10
+# still reaches systemd). The speaker name (`daemon.device_name`, default soloist-<hostname>)
+# and the WebSocket address (`daemon.address`, loopback only: the WebSocket has no
+# authentication) come from ~/.config/htpc-nowplaying/config.toml, and the API key from
+# ~/.config/soloist/api-key (mode 600). Soloist only accepts the key on the command line, so
+# other local users can see it in the process list; on a shared machine, keep that in mind.
+# The binary must be at ~/.local/bin/htpc-nowplaying.
 
 [Unit]
 Description=Spotify Soloist (Spotify Connect speaker)
@@ -14,9 +18,7 @@ After=pipewire.service wireplumber.service
 Wants=pipewire.service
 
 [Service]
-# --device-name is what Spotify lists; change HTPC to taste. --ws must match `daemon.address`
-# in htpc-nowplaying's config and stay on 127.0.0.1 (the WebSocket has no authentication).
-ExecStart=/bin/sh -c 'exec "%h/.local/opt/soloist/soloist" --device-name HTPC --ws 127.0.0.1:9090 --api-key "$$(cat "%h/.config/soloist/api-key")"'
+ExecStart=%h/.local/bin/htpc-nowplaying soloist
 Restart=on-failure
 RestartSec=5
 # Exit code 10 means this Soloist build has expired (builds last 90 days). Restarting cannot
