@@ -6,7 +6,10 @@ use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use slint::{ComponentHandle, Rgba8Pixel, SharedPixelBuffer, Timer, TimerMode};
+use slint::{
+    ComponentHandle, GraphicsAPI, RenderingState, Rgba8Pixel, SetRenderingNotifierError,
+    SharedPixelBuffer, Timer, TimerMode,
+};
 use tokio::sync::mpsc;
 
 use crate::config::Config;
@@ -14,11 +17,17 @@ use crate::cover::{CoverCache, DecodedImage};
 use crate::input::{Action, Focus, Screen, UiState, handle_key};
 use crate::model::{Command, NowPlaying, Playback, PlayerEvent};
 use crate::player;
+use crate::visualizer::{LiveAudio, Session, View};
+use crate::viz::{GlContext, Visualizer, VizError};
 
 slint::include_modules!();
 
 /// Covers are fetched at Spotify's largest size and drawn scaled.
 const COVER_PX: u32 = 640;
+/// How often the visualizer screen checks the audio while it shows a message instead of visuals.
+const VIZ_POLL: Duration = Duration::from_millis(100);
+
+type VizSession = Session<LiveAudio, Visualizer>;
 
 /// Runs the UI until its window is closed.
 ///
@@ -62,6 +71,7 @@ pub fn run_ui(cfg: Config) -> Result<(), Box<dyn Error>> {
         }
     });
     let controller = Controller::new(app.as_weak(), cfg, send, load_cover);
+    install_renderer(&app, &controller);
 
     let weak = Rc::downgrade(&controller);
     app.on_key(move |text| {
@@ -81,10 +91,76 @@ pub fn run_ui(cfg: Config) -> Result<(), Box<dyn Error>> {
     controller.borrow_mut().refresh();
     app.run()?;
 
+    // A renderer still alive here outlived its GL context (no teardown before exit); freeing
+    // it without the context could crash, and the process is ending anyway.
+    let viz = controller.borrow().viz.clone();
+    for renderer in viz.borrow_mut().gl_lost() {
+        std::mem::forget(renderer);
+    }
     // Dropping the controller drops the Soloist client, which closes the connection.
     drop(controller);
     runtime.shutdown_timeout(Duration::from_secs(1));
     Ok(())
+}
+
+/// Hooks projectM into the window's rendering: it is created, fed and drawn right before Slint
+/// draws, on the GL context Slint has current, and dropped there too. Without OpenGL (Slint's
+/// software renderer) the visualizer screen explains that instead.
+fn install_renderer(app: &App, controller: &Rc<RefCell<Controller>>) {
+    let session = controller.borrow().viz.clone();
+    let cfg = controller.borrow().cfg.visualizer.clone();
+    let window = app.as_weak();
+    let me = Rc::downgrade(controller);
+    let hook = session.clone();
+    let result = app.window().set_rendering_notifier(move |state, api| {
+        let Ok(mut s) = hook.try_borrow_mut() else {
+            return;
+        };
+        match state {
+            RenderingState::BeforeRendering => {
+                while let Some(closed) = s.take_released() {
+                    drop(closed);
+                }
+                if s.needs_renderer() {
+                    let made = match api {
+                        GraphicsAPI::NativeOpenGL { get_proc_address } => {
+                            // SAFETY: Slint keeps its GL context current around this callback,
+                            // and the visualizer is only used and dropped from here.
+                            let gl = unsafe { GlContext::current(get_proc_address) };
+                            Visualizer::new(gl, &cfg)
+                        }
+                        _ => Err(VizError::GlUnavailable(
+                            "the window does not render with OpenGL".to_owned(),
+                        )),
+                    };
+                    s.attach_renderer(made);
+                    // Visuals or an error now; update the window once this frame is done.
+                    let me = me.clone();
+                    Timer::single_shot(Duration::ZERO, move || {
+                        if let Some(controller) = me.upgrade() {
+                            controller.borrow_mut().refresh();
+                        }
+                    });
+                }
+                if let Some(app) = window.upgrade() {
+                    let size = app.window().size();
+                    s.frame(Instant::now(), size.width, size.height);
+                }
+            }
+            RenderingState::RenderingTeardown => drop(s.gl_lost()),
+            _ => {}
+        }
+    });
+    if let Err(e) = result {
+        let why = match e {
+            SetRenderingNotifierError::Unsupported => {
+                "the window is drawn without OpenGL (software renderer)".to_owned()
+            }
+            other => other.to_string(),
+        };
+        log::info!("visualizer unavailable: {why}");
+        session.borrow_mut().gl_unavailable(why);
+    }
 }
 
 type CommandSink = Box<dyn Fn(Command)>;
@@ -103,6 +179,12 @@ struct Controller {
     cover_wanted: Option<String>,
     send: CommandSink,
     load_cover: CoverLoader,
+    /// Shared with the rendering hook, which creates and draws the renderer.
+    viz: Rc<RefCell<VizSession>>,
+    /// Paces the visualizer: frames at its FPS cap while it draws, slow polling otherwise,
+    /// stopped while it is closed.
+    frames: Timer,
+    frame_interval: Option<Duration>,
 }
 
 impl Controller {
@@ -116,6 +198,7 @@ impl Controller {
             RefCell::new(Controller {
                 app,
                 me: me.clone(),
+                viz: Rc::new(RefCell::new(Session::new(&cfg.visualizer))),
                 cfg,
                 player: NowPlaying::default(),
                 ui: UiState::default(),
@@ -123,13 +206,29 @@ impl Controller {
                 cover_wanted: None,
                 send,
                 load_cover,
+                frames: Timer::default(),
+                frame_interval: None,
             })
         })
     }
 
     fn apply(&mut self, ev: PlayerEvent) {
-        self.player.apply(ev, Instant::now(), unix_now_ms());
+        let now = Instant::now();
+        let before = self.track_names();
+        self.player.apply(ev, now, unix_now_ms());
+        let after = self.track_names();
+        if after != before
+            && let Some((title, artist)) = after
+        {
+            self.viz.borrow_mut().track_changed(now, title, artist);
+        }
         self.refresh();
+    }
+
+    /// Title and artist of the current track, for the visualizer's overlay.
+    fn track_names(&self) -> Option<(String, String)> {
+        let track = self.player.track.as_ref()?;
+        Some((track.title.clone(), track.artist.clone()))
     }
 
     /// Handles a key press; returns false for keys that are not bound.
@@ -137,20 +236,89 @@ impl Controller {
         let Some(key) = key_name(text).and_then(|name| self.cfg.keys.get(&name)) else {
             return false;
         };
+        let now = Instant::now();
+        // The screen switch itself already happened in `handle_key`.
         match handle_key(&mut self.ui, key, &self.cfg) {
             Action::Send(cmd) => (self.send)(cmd),
-            // The screen switch already happened in `handle_key`; the visualizer itself and
-            // its preset controls are not built yet.
-            Action::OpenVisualizer
-            | Action::CloseVisualizer
-            | Action::PreviousPreset
-            | Action::NextPreset
-            | Action::TogglePresetLock
-            | Action::BeatSensitivityDelta(_)
-            | Action::None => {}
+            Action::OpenVisualizer => {
+                let delay_ms = self.cfg.visualizer.delay_ms;
+                let track = self.track_names();
+                self.viz
+                    .borrow_mut()
+                    .open(now, || LiveAudio::start(delay_ms), track);
+            }
+            Action::CloseVisualizer => self.viz.borrow_mut().close(),
+            Action::PreviousPreset => self.viz.borrow_mut().prev_preset(now),
+            Action::NextPreset => self.viz.borrow_mut().next_preset(now),
+            Action::TogglePresetLock => self.viz.borrow_mut().toggle_lock(now),
+            Action::BeatSensitivityDelta(delta) => {
+                self.viz.borrow_mut().adjust_beat_sensitivity(now, delta);
+            }
+            Action::None => {}
         }
         self.refresh();
         true
+    }
+
+    /// One visualizer tick: picks up audio changes, updates the overlays and asks for a frame
+    /// when there is something to draw (or a renderer to create).
+    fn viz_tick(&mut self) {
+        self.viz.borrow_mut().poll();
+        let view = self.refresh_viz(Instant::now());
+        let needs_renderer = self.viz.borrow().needs_renderer();
+        if (view.rendering || needs_renderer)
+            && let Some(app) = self.app.upgrade()
+        {
+            app.window().request_redraw();
+        }
+    }
+
+    /// Pushes the visualizer's view into the window and paces its frames.
+    fn refresh_viz(&mut self, now: Instant) -> View {
+        let view = self.viz.borrow().view(now);
+        if let Some(app) = self.app.upgrade() {
+            app.set_viz_rendering(view.rendering);
+            app.set_viz_message(view.message.as_str().into());
+            app.set_viz_detail(view.detail.as_str().into());
+            // Texts stay set while hidden, so they fade out instead of vanishing.
+            if let Some((title, artist)) = &view.overlay {
+                app.set_viz_overlay_title(title.as_str().into());
+                app.set_viz_overlay_artist(artist.as_str().into());
+            }
+            app.set_viz_overlay_visible(view.overlay.is_some());
+            if let Some(status) = &view.status {
+                app.set_viz_status(status.as_str().into());
+            }
+            app.set_viz_status_visible(view.status.is_some());
+        }
+        self.schedule_frames(&view);
+        view
+    }
+
+    fn schedule_frames(&mut self, view: &View) {
+        let interval = if !self.viz.borrow().is_open() {
+            None
+        } else if view.rendering {
+            let fps = self.viz.borrow().fps_cap().max(1);
+            Some(Duration::from_secs(1) / fps)
+        } else {
+            Some(VIZ_POLL)
+        };
+        if interval == self.frame_interval {
+            return;
+        }
+        self.frame_interval = interval;
+        match interval {
+            None => self.frames.stop(),
+            Some(interval) => {
+                let me = self.me.clone();
+                self.frames.start(TimerMode::Repeated, interval, move || {
+                    if let Some(controller) = me.upgrade() {
+                        controller.borrow_mut().viz_tick();
+                    }
+                });
+            }
+        }
     }
 
     fn cover_loaded(&mut self, url: &str, image: Option<Arc<DecodedImage>>) {
@@ -216,6 +384,7 @@ impl Controller {
         }
 
         self.schedule_tick(now);
+        self.refresh_viz(now);
     }
 
     /// Ticks only while the progress is on screen and moving, at the next whole second of
@@ -331,6 +500,8 @@ mod tests {
                 Box::new(move |cmd| sink.borrow_mut().push(cmd)),
                 Box::new(move |url, _| requests.borrow_mut().push(url)),
             );
+            // The testing backend has no OpenGL: the visualizer explains that.
+            install_renderer(&app, &controller);
             controller.borrow_mut().refresh();
             Harness {
                 app,
@@ -573,19 +744,73 @@ mod tests {
         assert!(!h.controller.borrow_mut().key("q"));
     }
 
-    #[test]
-    fn visualizer_placeholder_and_back() {
-        let h = harness();
-        h.playing(track("A"));
+    fn open_visualizer(h: &Harness) {
         for _ in 0..3 {
             h.press(Key::RightArrow);
         }
         h.press(Key::Return);
-        assert!(h.exists("App::viz-placeholder"));
+    }
+
+    #[test]
+    fn visualizer_without_gl_explains_and_back_works() {
+        let h = harness();
+        h.playing(track("A"));
+        open_visualizer(&h);
+        assert!(h.exists("App::viz-view"));
         assert!(!h.exists("App::now-playing"));
+        assert!(!h.app.get_viz_rendering());
+        assert_eq!(
+            h.label("App::viz-message-text"),
+            "The visualizer needs OpenGL"
+        );
+        assert!(
+            h.label("App::viz-detail-text")
+                .contains("software renderer")
+        );
+        assert!(
+            h.exists("App::viz-message-box"),
+            "shown at once: it is an error"
+        );
+
+        // Preset keys are harmless without a renderer; Back returns.
+        for key in [Key::LeftArrow, Key::RightArrow, Key::UpArrow, Key::Return] {
+            assert!(h.press(key));
+        }
         h.press(Key::Escape);
         assert!(h.exists("App::now-playing"));
         assert!(h.ring_inside("App::viz-button"));
+        assert!(
+            h.sent.borrow().is_empty(),
+            "no player commands from the visualizer"
+        );
+    }
+
+    #[test]
+    fn visualizer_shows_the_track_overlay() {
+        let h = harness();
+        h.playing(track("A"));
+        open_visualizer(&h);
+        assert!(h.app.get_viz_overlay_visible(), "shown on open");
+        assert_eq!(h.label("App::viz-overlay-title"), "A");
+        assert_eq!(h.label("App::viz-overlay-artist"), "Glass Animals");
+
+        h.apply([PlayerEvent::TrackChanged(Some(track("B")))]);
+        assert_eq!(h.label("App::viz-overlay-title"), "B");
+        assert!(h.app.get_viz_overlay_visible());
+    }
+
+    #[test]
+    fn visualizer_frames_paced_only_while_open() {
+        let h = harness();
+        h.playing(track("A"));
+        assert!(!h.controller.borrow().frames.running());
+        open_visualizer(&h);
+        // No renderer can exist here, so it polls slowly instead of drawing.
+        assert!(h.controller.borrow().frames.running());
+        assert_eq!(h.controller.borrow().frame_interval, Some(VIZ_POLL));
+        h.press(Key::Escape);
+        assert!(!h.controller.borrow().frames.running());
+        assert_eq!(h.controller.borrow().frame_interval, None);
     }
 
     #[test]

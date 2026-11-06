@@ -5,4 +5,5 @@ pub mod input;
 pub mod model;
 pub mod player;
 pub mod ui;
+pub mod visualizer;
 pub mod viz;

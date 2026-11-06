@@ -1,4 +1,4 @@
-// Now-playing, idle and reconnecting views. Sizes are designed for 1920×1080 and scale with the
+// Now-playing, idle, reconnecting and visualizer views. Sizes are designed for 1920×1080 and scale with the
 // window. Icons are vector paths so they do not depend on the fonts installed on the HTPC.
 
 global Theme {
@@ -72,6 +72,15 @@ export component App inherits Window {
     in property <int> focused-button: 1;
     in property <image> cover-image;
     in property <bool> has-cover;
+    // Visualizer screen.
+    in property <bool> viz-rendering;
+    in property <string> viz-message;
+    in property <string> viz-detail;
+    in property <bool> viz-overlay-visible;
+    in property <string> viz-overlay-title;
+    in property <string> viz-overlay-artist;
+    in property <bool> viz-status-visible;
+    in property <string> viz-status;
 
     // Receives the key's text; returns true if the key was handled.
     callback key(string) -> bool;
@@ -225,23 +234,87 @@ export component App inherits Window {
         }
     }
 
-    // Stand-in until the visualizer exists; Back returns to now-playing.
-    if root.visualizer: viz-placeholder := Rectangle {
-        background: black;
-        VerticalLayout {
+    // projectM draws underneath (src/ui.rs, before Slint renders). While it does, nothing here
+    // may be opaque across the window; otherwise a black screen carries the message.
+    if root.visualizer: viz-view := Rectangle {
+        background: root.viz-rendering ? transparent : black;
+
+        if root.viz-message != "": viz-message-box := VerticalLayout {
             alignment: center;
             spacing: 16px * root.s;
-            Text {
-                text: "Visualizer not available yet";
+            padding: 120px * root.s;
+            viz-message-text := Text {
+                text: root.viz-message;
                 font-size: 48px * root.s;
                 color: Theme.dim;
                 horizontal-alignment: center;
+                overflow: elide;
+                wrap: no-wrap;
             }
-            Text {
-                text: "Press Back to return";
+            viz-detail-text := Text {
+                text: root.viz-detail;
                 font-size: 30px * root.s;
                 color: Theme.faint;
                 horizontal-alignment: center;
+                overflow: elide;
+                wrap: no-wrap;
+            }
+            Text {
+                text: "Press Back to return";
+                font-size: 26px * root.s;
+                color: Theme.faint;
+                horizontal-alignment: center;
+            }
+        }
+
+        viz-overlay := Rectangle {
+            x: 64px * root.s;
+            y: parent.height - self.height - 64px * root.s;
+            width: min(parent.width - 128px * root.s, 1100px * root.s);
+            height: overlay-layout.preferred-height;
+            border-radius: 16px * root.s;
+            background: #000000a0;
+            opacity: root.viz-overlay-visible ? 1 : 0;
+            animate opacity { duration: 300ms; }
+            overlay-layout := VerticalLayout {
+                padding: 28px * root.s;
+                spacing: 8px * root.s;
+                viz-overlay-title := Text {
+                    text: root.viz-overlay-title;
+                    font-size: 44px * root.s;
+                    font-weight: 700;
+                    color: Theme.text;
+                    overflow: elide;
+                    wrap: no-wrap;
+                }
+                if root.viz-overlay-artist != "": viz-overlay-artist := Text {
+                    text: root.viz-overlay-artist;
+                    font-size: 32px * root.s;
+                    color: Theme.dim;
+                    overflow: elide;
+                    wrap: no-wrap;
+                }
+            }
+        }
+
+        viz-status-box := Rectangle {
+            x: parent.width - self.width - 64px * root.s;
+            y: 64px * root.s;
+            width: min(status-text.preferred-width + 56px * root.s, parent.width - 128px * root.s);
+            height: 72px * root.s;
+            border-radius: 16px * root.s;
+            background: #000000a0;
+            opacity: root.viz-status-visible ? 1 : 0;
+            animate opacity { duration: 200ms; }
+            status-text := Text {
+                width: parent.width - 56px * root.s;
+                text: root.viz-status;
+                font-size: 32px * root.s;
+                color: Theme.text;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                overflow: elide;
+                wrap: no-wrap;
             }
         }
     }
