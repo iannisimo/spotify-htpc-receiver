@@ -2,7 +2,7 @@ use std::ffi::OsString;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use htpc_nowplaying::{config, instance, soloist, ui, watch};
+use htpc_nowplaying::{config, instance, pairing, soloist, ui, watch};
 
 /// Spotify Connect now-playing screen and visualizer for a dpad-controlled HTPC.
 #[derive(Parser)]
@@ -24,6 +24,8 @@ enum Command {
         #[arg(last = true)]
         args: Vec<OsString>,
     },
+    /// Open the pairing port if pairing is On (run by the Soloist unit after it starts).
+    PairingSync,
 }
 
 fn main() -> ExitCode {
@@ -34,6 +36,7 @@ fn main() -> ExitCode {
         Command::Run => "warn",
         Command::Watch => "warn,htpc_nowplaying=info",
         Command::Soloist { .. } => "warn",
+        Command::PairingSync => "warn,htpc_nowplaying=info",
     };
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default_log)).init();
     let cfg = config::load(&config::default_path());
@@ -42,6 +45,12 @@ fn main() -> ExitCode {
         Command::Watch => run_watch(cfg),
         // Only returns when Soloist could not be started.
         Command::Soloist { args } => Err(soloist::exec_soloist(&cfg.daemon, &args).into()),
+        Command::PairingSync => {
+            let status = pairing::pairing_sync(&cfg, pairing::run_helper);
+            log::info!("pairing: {status:?}");
+            // A firewall problem must never fail the Soloist unit.
+            Ok(())
+        }
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

@@ -5,6 +5,7 @@ pub mod cover;
 pub mod input;
 pub mod instance;
 pub mod model;
+pub mod pairing;
 pub mod player;
 pub mod settings;
 pub mod soloist;

@@ -18,7 +18,13 @@ After=pipewire.service wireplumber.service
 Wants=pipewire.service
 
 [Service]
+# Pairing (see the README, "Pairing"): the firewall port Soloist listens on is opened for the
+# local network while Soloist runs with `pairing = "on"`, and closed when it stops. All three
+# lines start with "-" so a missing pairing helper never keeps Soloist from running.
+ExecStartPre=-/usr/bin/sudo -n /usr/local/libexec/htpc-nowplaying/pairing-port close
 ExecStart=%h/.local/bin/htpc-nowplaying soloist
+ExecStartPost=-%h/.local/bin/htpc-nowplaying pairing-sync
+ExecStopPost=-/usr/bin/sudo -n /usr/local/libexec/htpc-nowplaying/pairing-port close
 Restart=on-failure
 RestartSec=5
 # Exit code 10 means this Soloist build has expired (builds last 90 days). Restarting cannot
