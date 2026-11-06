@@ -21,6 +21,7 @@ tokio-tungstenite = { version = "0.30.0", default-features = false, features = [
 libloading = "0.8.9"
 pipewire = { version = "0.10.1", features = ["v0_3_44"] }
 toml = { version = "1.2.0", default-features = false, features = ["std", "serde", "parse"] }
+toml_edit = "0.25"
 
 [dev-dependencies]
 i-slint-backend-testing = "=1.18.1"

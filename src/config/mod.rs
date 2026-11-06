@@ -12,6 +12,12 @@ use serde::Deserialize;
 
 use crate::input::{Key, key_from_name};
 
+mod save;
+pub use save::{SaveError, Setting, save_setting};
+
+/// Longest speaker name Spotify's device list takes comfortably.
+const NAME_MAX: usize = 32;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     /// Ask the compositor for a fullscreen window. Some ignore the request by policy (for
@@ -30,6 +36,121 @@ pub struct Config {
 pub struct DaemonConfig {
     /// Soloist's WebSocket address, as passed to its `--ws` flag.
     pub address: String,
+    /// Keep a firewall port open for pairing while Soloist runs.
+    pub pairing: PairingMode,
+    /// The speaker name as written in the file (validated where used); `None` means
+    /// [`default_device_name`].
+    pub device_name: Option<String>,
+    /// The Soloist binary `htpc-nowplaying soloist` starts.
+    pub soloist_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PairingMode {
+    #[default]
+    Off,
+    On,
+}
+
+impl PairingMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PairingMode::Off => "off",
+            PairingMode::On => "on",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NameError {
+    Empty,
+    TooLong,
+    BadChar(char),
+}
+
+impl std::fmt::Display for NameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NameError::Empty => f.write_str("Name is empty"),
+            NameError::TooLong => write!(f, "Name is too long ({NAME_MAX} max)"),
+            NameError::BadChar(c) => write!(f, "'{c}' can't be used"),
+        }
+    }
+}
+
+impl std::error::Error for NameError {}
+
+/// Checks a speaker name and returns it trimmed: 1–32 characters of letters, digits, space and
+/// `- _ . '`.
+pub fn validate_device_name(raw: &str) -> Result<String, NameError> {
+    let name = raw.trim();
+    if name.is_empty() {
+        return Err(NameError::Empty);
+    }
+    if let Some(c) = name
+        .chars()
+        .find(|c| !(c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.' | '\'')))
+    {
+        return Err(NameError::BadChar(c));
+    }
+    if name.chars().count() > NAME_MAX {
+        return Err(NameError::TooLong);
+    }
+    Ok(name.to_owned())
+}
+
+/// `soloist-` and the short hostname, or `soloist-htpc` when the hostname is unknown.
+pub fn default_device_name() -> String {
+    let host = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default();
+    default_name_for_host(&host)
+}
+
+fn default_name_for_host(hostname: &str) -> String {
+    let short = hostname.trim().split('.').next().unwrap_or("");
+    let short = if short.is_empty() { "htpc" } else { short };
+    // Hostnames are letters, digits and hyphens; anything else would fail validation.
+    let cleaned: String = short
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    format!("soloist-{cleaned}")
+        .chars()
+        .take(NAME_MAX)
+        .collect()
+}
+
+/// The name Soloist is started with: the configured one, or the default when absent or invalid
+/// (invalid also logs a warning).
+pub fn effective_device_name(cfg: &DaemonConfig) -> String {
+    let (name, error) = resolve_device_name(cfg.device_name.as_deref(), &default_device_name());
+    if let Some(e) = error {
+        log::warn!("`daemon.device_name`: {e}; using {name}");
+    }
+    name
+}
+
+fn resolve_device_name(configured: Option<&str>, default: &str) -> (String, Option<NameError>) {
+    match configured.map(validate_device_name) {
+        None => (default.to_owned(), None),
+        Some(Ok(name)) => (name, None),
+        Some(Err(e)) => (default.to_owned(), Some(e)),
+    }
+}
+
+/// `$XDG_CONFIG_HOME/htpc-nowplaying/disabled-presets.txt`, next to `config.toml`.
+pub fn disabled_presets_path() -> PathBuf {
+    let config = default_path();
+    config
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_default()
+        .join("disabled-presets.txt")
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -75,6 +196,7 @@ impl Default for KeyMap {
             ("Return", Key::Ok),
             ("Escape", Key::Back),
             ("BackSpace", Key::Back),
+            ("Menu", Key::Settings),
         ];
         KeyMap(
             bindings
@@ -93,6 +215,9 @@ impl Default for Config {
             volume_step: 5,
             daemon: DaemonConfig {
                 address: "127.0.0.1:9090".to_owned(),
+                pairing: PairingMode::Off,
+                device_name: None,
+                soloist_path: expand_tilde(DEFAULT_SOLOIST_PATH, std::env::home_dir().as_deref()),
             },
             visualizer: VisualizerConfig {
                 preset_dir: None,
@@ -114,6 +239,7 @@ impl Default for Config {
 }
 
 const APP_DIR: &str = "htpc-nowplaying";
+const DEFAULT_SOLOIST_PATH: &str = "~/.local/opt/soloist/soloist";
 
 pub fn default_path() -> PathBuf {
     default_path_from(std::env::var_os("XDG_CONFIG_HOME"), std::env::home_dir())
@@ -190,6 +316,9 @@ struct RawConfig {
 #[serde(default)]
 struct RawDaemon {
     address: String,
+    pairing: String,
+    device_name: Option<String>,
+    soloist_path: String,
 }
 
 #[derive(Deserialize)]
@@ -219,6 +348,9 @@ impl Default for RawConfig {
             volume_step: d.volume_step.into(),
             daemon: RawDaemon {
                 address: d.daemon.address,
+                pairing: d.daemon.pairing.as_str().to_owned(),
+                device_name: None,
+                soloist_path: DEFAULT_SOLOIST_PATH.to_owned(),
             },
             visualizer: RawVisualizer {
                 preset_dir: None,
@@ -309,11 +441,32 @@ fn validate(raw: RawConfig, home: Option<&Path>, w: &mut Vec<String>) -> Config 
         d.daemon.address
     };
 
+    let pairing = match raw.daemon.pairing.as_str() {
+        "on" => PairingMode::On,
+        "off" => PairingMode::Off,
+        other => {
+            w.push(format!(
+                "`daemon.pairing` = {other:?} is not \"on\" or \"off\"; using \"off\""
+            ));
+            PairingMode::Off
+        }
+    };
+    let soloist_path = if raw.daemon.soloist_path.is_empty() {
+        d.daemon.soloist_path
+    } else {
+        expand_tilde(&raw.daemon.soloist_path, home)
+    };
+
     Config {
         fullscreen: raw.fullscreen,
         audio_controls: raw.audio_controls,
         volume_step: clamp_int(w, "volume_step", raw.volume_step, 1, 25),
-        daemon: DaemonConfig { address },
+        daemon: DaemonConfig {
+            address,
+            pairing,
+            device_name: raw.daemon.device_name,
+            soloist_path,
+        },
         visualizer,
         keys: apply_key_remap(raw.keys, w),
     }
@@ -379,7 +532,7 @@ fn apply_key_remap(remap: BTreeMap<String, String>, w: &mut Vec<String>) -> KeyM
             keys.0.insert(key_name, key);
         } else {
             w.push(format!(
-                "`keys.{key_name}` = {action:?} is not one of left, right, up, down, ok, back, none; ignored"
+                "`keys.{key_name}` = {action:?} is not one of left, right, up, down, ok, back, settings, none; ignored"
             ));
         }
     }
@@ -565,7 +718,7 @@ mod tests {
     /// it must parse cleanly and give exactly the defaults (preset_dir aside, which has none).
     #[test]
     fn example_config_documents_the_defaults() {
-        let example = include_str!("../packaging/config.example.toml");
+        let example = include_str!("../../packaging/config.example.toml");
         let uncommented: String = example
             .lines()
             .map(|line| match line.strip_prefix("# ") {
@@ -574,9 +727,9 @@ mod tests {
             })
             .map(|line| format!("{line}\n"))
             .collect();
-        // 3 top-level, 1 daemon, 12 visualizer, 7 default keys: a new setting belongs here too.
+        // 3 top-level, 4 daemon, 12 visualizer, 8 default keys: a new setting belongs here too.
         let settings = uncommented.lines().filter(|l| l.contains(" = ")).count();
-        assert_eq!(settings, 23);
+        assert_eq!(settings, 27);
 
         let (mut cfg, warnings) = parse_with_home(&uncommented, Some(Path::new("/home/me")));
         assert!(warnings.is_empty(), "{warnings:?}");
@@ -584,7 +737,98 @@ mod tests {
             cfg.visualizer.preset_dir.take(),
             Some(PathBuf::from("/home/me/.local/share/projectM/presets"))
         );
+        // These two have no fixed default (the name follows the hostname, the path the home
+        // folder), so the example shows a sample value.
+        assert_eq!(
+            cfg.daemon.device_name.take().as_deref(),
+            Some("soloist-myhost")
+        );
+        assert_eq!(
+            std::mem::take(&mut cfg.daemon.soloist_path),
+            PathBuf::from("/home/me/.local/opt/soloist/soloist")
+        );
+        cfg.daemon.soloist_path = Config::default().daemon.soloist_path;
         assert_eq!(cfg, Config::default());
+    }
+
+    #[test]
+    fn pairing_mode_parses() {
+        let (cfg, warnings) = parse("[daemon]\npairing = \"on\"\n");
+        assert_eq!(cfg.daemon.pairing, PairingMode::On);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let (cfg, warnings) = parse("");
+        assert_eq!(cfg.daemon.pairing, PairingMode::Off);
+        assert!(warnings.is_empty());
+        let (cfg, warnings) = parse("[daemon]\npairing = \"always\"\n");
+        assert_eq!(cfg.daemon.pairing, PairingMode::Off);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+    }
+
+    #[test]
+    fn device_name_validation() {
+        assert_eq!(
+            validate_device_name("  Living room  "),
+            Ok("Living room".to_owned())
+        );
+        assert_eq!(validate_device_name(""), Err(NameError::Empty));
+        assert_eq!(validate_device_name("   "), Err(NameError::Empty));
+        assert_eq!(
+            validate_device_name(&"a".repeat(33)),
+            Err(NameError::TooLong)
+        );
+        assert_eq!(validate_device_name(&"a".repeat(32)), Ok("a".repeat(32)));
+        assert_eq!(validate_device_name("tv/1"), Err(NameError::BadChar('/')));
+        assert!(validate_device_name("Kitchen's TV-2_b.x").is_ok());
+        assert_eq!(NameError::Empty.to_string(), "Name is empty");
+        assert_eq!(NameError::TooLong.to_string(), "Name is too long (32 max)");
+        assert_eq!(NameError::BadChar('/').to_string(), "'/' can't be used");
+    }
+
+    #[test]
+    fn default_device_name_shape() {
+        let name = default_device_name();
+        assert!(name.starts_with("soloist-"), "{name}");
+        assert!(name.chars().count() <= 32);
+        assert!(validate_device_name(&name).is_ok(), "{name}");
+        assert_eq!(default_name_for_host("Den.local\n"), "soloist-Den");
+        assert_eq!(default_name_for_host(""), "soloist-htpc");
+        assert_eq!(default_name_for_host(&"h".repeat(60)).chars().count(), 32);
+    }
+
+    #[test]
+    fn effective_name_falls_back() {
+        assert_eq!(
+            resolve_device_name(None, "soloist-x"),
+            ("soloist-x".to_owned(), None)
+        );
+        assert_eq!(
+            resolve_device_name(Some("x/y"), "soloist-x"),
+            ("soloist-x".to_owned(), Some(NameError::BadChar('/')))
+        );
+        assert_eq!(
+            resolve_device_name(Some("Den"), "soloist-x"),
+            ("Den".to_owned(), None)
+        );
+        let mut daemon = Config::default().daemon;
+        daemon.device_name = Some(" Den ".to_owned());
+        assert_eq!(effective_device_name(&daemon), "Den");
+    }
+
+    #[test]
+    fn settings_key_defaults_to_menu() {
+        assert_eq!(KeyMap::default().get("Menu"), Some(Key::Settings));
+    }
+
+    #[test]
+    fn soloist_path_is_expanded() {
+        let (cfg, _) = parse_with_home(
+            "[daemon]\nsoloist_path = \"~/bin/soloist\"\n",
+            Some(Path::new("/home/me")),
+        );
+        assert_eq!(
+            cfg.daemon.soloist_path,
+            PathBuf::from("/home/me/bin/soloist")
+        );
     }
 
     #[test]

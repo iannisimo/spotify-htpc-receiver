@@ -12,17 +12,21 @@ pub enum Key {
     Down,
     Ok,
     Back,
+    /// Opens the settings panel: the fallback for remotes that cannot hold OK.
+    Settings,
 }
 
-/// Parses a logical key name (`left`, `right`, `up`, `down`, `ok`, `back`), ignoring ASCII case.
+/// Parses a logical key name (`left`, `right`, `up`, `down`, `ok`, `back`, `settings`),
+/// ignoring ASCII case.
 pub fn key_from_name(name: &str) -> Option<Key> {
-    const NAMES: [(&str, Key); 6] = [
+    const NAMES: [(&str, Key); 7] = [
         ("left", Key::Left),
         ("right", Key::Right),
         ("up", Key::Up),
         ("down", Key::Down),
         ("ok", Key::Ok),
         ("back", Key::Back),
+        ("settings", Key::Settings),
     ];
     NAMES
         .iter()
@@ -62,6 +66,7 @@ pub enum Action {
     NextPreset,
     TogglePresetLock,
     BeatSensitivityDelta(f32),
+    OpenSettings,
     None,
 }
 
@@ -86,6 +91,9 @@ impl Focus {
 
 /// Applies a button press to the UI state and returns what the app should do.
 pub fn handle_key(ui: &mut UiState, key: Key, cfg: &Config) -> Action {
+    if key == Key::Settings {
+        return Action::OpenSettings;
+    }
     match ui.screen {
         Screen::NowPlaying => match key {
             Key::Left => {
@@ -110,7 +118,7 @@ pub fn handle_key(ui: &mut UiState, key: Key, cfg: &Config) -> Action {
                 let delta = if key == Key::Up { step } else { -step };
                 Action::Send(Command::VolumeDelta(delta))
             }
-            Key::Up | Key::Down | Key::Back => Action::None,
+            Key::Up | Key::Down | Key::Back | Key::Settings => Action::None,
         },
         Screen::Visualizer => match key {
             Key::Left => Action::PreviousPreset,
@@ -118,6 +126,7 @@ pub fn handle_key(ui: &mut UiState, key: Key, cfg: &Config) -> Action {
             Key::Up => Action::BeatSensitivityDelta(BEAT_SENSITIVITY_STEP),
             Key::Down => Action::BeatSensitivityDelta(-BEAT_SENSITIVITY_STEP),
             Key::Ok => Action::TogglePresetLock,
+            Key::Settings => Action::None,
             Key::Back => {
                 ui.screen = Screen::NowPlaying;
                 Action::CloseVisualizer

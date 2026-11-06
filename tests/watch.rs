@@ -204,6 +204,7 @@ async fn daemon_down_at_start_watcher_waits() {
     let task = tokio::spawn(watch(
         cfg(DaemonConfig {
             address: address.clone(),
+            ..Config::default().daemon
         }),
         launcher.clone(),
     ));

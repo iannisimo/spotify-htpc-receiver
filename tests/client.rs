@@ -147,6 +147,7 @@ async fn starts_while_daemon_down_then_connects_when_it_appears() {
     let _client = player::spawn(
         DaemonConfig {
             address: address.clone(),
+            ..Config::default().daemon
         },
         tx,
     );

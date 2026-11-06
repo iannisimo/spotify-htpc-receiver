@@ -1,0 +1,8 @@
+# My settings
+foo = 1 # not a real key
+
+# Keep the TV in sync
+[visualizer]
+# audio lag
+delay_ms = 0 # measured on the laptop
+shuffle = true

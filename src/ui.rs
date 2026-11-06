@@ -261,7 +261,8 @@ impl Controller {
             Action::BeatSensitivityDelta(delta) => {
                 self.viz.borrow_mut().adjust_beat_sensitivity(now, delta);
             }
-            Action::None => {}
+            // Wired up with the settings panel.
+            Action::OpenSettings | Action::None => {}
         }
         self.refresh();
         true

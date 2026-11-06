@@ -7,7 +7,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use futures_util::SinkExt;
-use htpc_nowplaying::config::DaemonConfig;
+use htpc_nowplaying::config::{Config, DaemonConfig};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
 use tokio_tungstenite::WebSocketStream;
@@ -34,6 +34,7 @@ impl FakeSoloist {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let cfg = DaemonConfig {
             address: listener.local_addr().unwrap().to_string(),
+            ..Config::default().daemon
         };
         (FakeSoloist { listener }, cfg)
     }

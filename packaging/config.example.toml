@@ -18,6 +18,17 @@
 # WebSocket has no authentication.
 # address = "127.0.0.1:9090"
 
+# Keep a firewall port open on the local network for pairing while Soloist runs: "on" or
+# "off". Needs the pairing helper (see the README); the settings panel toggles it.
+# pairing = "off"
+
+# The name Spotify lists for this device (1-32 letters, digits, space and - _ . '). The
+# default is soloist-<hostname>. Changing it restarts Soloist.
+# device_name = "soloist-myhost"
+
+# The Soloist program that `htpc-nowplaying soloist` starts.
+# soloist_path = "~/.local/opt/soloist/soloist"
+
 [visualizer]
 # Folder of Milkdrop .milk presets, searched recursively. Without it the app looks in
 # ~/.local/share/projectM/presets, then /usr/local/share/projectM/presets and
@@ -57,10 +68,11 @@
 
 [keys]
 # Maps the keys your remote sends to its buttons: left, right, up, down, ok, back, or none to
-# unbind. Key names are as `wev` shows them: arrows, Return, Escape, BackSpace, Tab, space,
+# unbind; settings opens the settings panel (holding OK does too). Key names are as `wev` shows them: arrows, Return, Escape, BackSpace, Tab, space,
 # Delete, Insert, Home, End, Page_Up, Page_Down, Menu, Pause, F1-F24 or a printable
 # character. Media keys and a dedicated Back key (XF86Back) never reach the app, so a remote's
 # Back button must send Escape or BackSpace. Entries here add to or replace the defaults.
+# Menu = "settings"
 # Left = "left"
 # Right = "right"
 # Up = "up"
