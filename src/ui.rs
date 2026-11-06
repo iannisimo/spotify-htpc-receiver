@@ -2,24 +2,32 @@
 
 use std::cell::RefCell;
 use std::error::Error;
+use std::path::{Path, PathBuf};
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use slint::{
-    ComponentHandle, GraphicsAPI, RenderingState, Rgba8Pixel, SetRenderingNotifierError,
-    SharedPixelBuffer, Timer, TimerMode,
+    ComponentHandle, GraphicsAPI, ModelRc, RenderingState, Rgba8Pixel, SetRenderingNotifierError,
+    SharedPixelBuffer, Timer, TimerMode, VecModel,
 };
 use tokio::sync::mpsc;
 
-use crate::config::{Config, disabled_presets_path};
+use crate::calibrate::Calibration;
+use crate::config::{
+    Config, PairingMode, Setting, default_path, disabled_presets_path, save_setting,
+};
 use crate::cover::{CoverCache, DecodedImage};
-use crate::input::{Action, Focus, Screen, UiState, handle_key};
+use crate::input::{Action, Focus, HOLD, Key, OkGesture, OkHold, Screen, UiState, handle_key};
 use crate::model::{Command, NowPlaying, Playback, PlayerEvent};
+use crate::pairing::{HelperCommand, HelperStatus, Pairing};
 use crate::player;
+use crate::settings::{Effect, Panel, PanelView, Row, Values};
+use crate::soloist;
 use crate::visualizer::{LiveAudio, Session, View};
 use crate::viz::disabled::DisabledPresets;
-use crate::viz::{GlContext, Visualizer, VizError};
+use crate::viz::tree::{Check, PresetTree};
+use crate::viz::{self, GlContext, Visualizer, VizError};
 
 slint::include_modules!();
 
@@ -27,6 +35,45 @@ slint::include_modules!();
 const COVER_PX: u32 = 640;
 /// How often the visualizer screen checks the audio while it shows a message instead of visuals.
 const VIZ_POLL: Duration = Duration::from_millis(100);
+/// Calibration reads the audio and redraws the flash this often, while its view is open.
+const CALIBRATION_TICK: Duration = Duration::from_millis(33);
+/// Rows of the preset tree shown at once.
+const TREE_WINDOW: usize = 15;
+
+/// Where the settings are saved.
+#[derive(Debug, Clone)]
+pub struct Paths {
+    pub config: PathBuf,
+    pub disabled: PathBuf,
+}
+
+impl Paths {
+    /// `config.toml` and `disabled-presets.txt` in the user's config folder.
+    pub fn from_env() -> Paths {
+        Paths {
+            config: default_path(),
+            disabled: disabled_presets_path(),
+        }
+    }
+}
+
+/// Work that must not run on the UI thread: it blocks on `sudo` or `systemctl`.
+#[derive(Debug, Clone, PartialEq)]
+enum Job {
+    /// Run the pairing helper.
+    Helper(HelperCommand),
+    /// Soloist connected or dropped: ask whether its systemd unit is running.
+    ConnectionChanged(PlayerEvent),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum JobResult {
+    Helper(HelperStatus),
+    Connection(PlayerEvent, bool),
+}
+
+/// Runs a job away from the UI thread and delivers its result back to the controller.
+type Background = Box<dyn Fn(Job, Weak<RefCell<Controller>>)>;
 
 type VizSession = Session<LiveAudio, Visualizer>;
 
@@ -55,6 +102,22 @@ pub fn run_ui(cfg: Config) -> Result<(), Box<dyn Error>> {
     app.window().set_fullscreen(cfg.fullscreen);
 
     let send: CommandSink = Box::new(move |cmd| client.send(cmd));
+    let jobs_io = io.clone();
+    let background: Background = Box::new(move |job, controller| {
+        let work = jobs_io.spawn_blocking(move || match job {
+            Job::Helper(cmd) => JobResult::Helper(crate::pairing::run_helper(cmd)),
+            Job::ConnectionChanged(ev) => JobResult::Connection(ev, soloist::service_active()),
+        });
+        let deliver = slint::spawn_local(async move {
+            let Ok(result) = work.await else { return };
+            if let Some(controller) = controller.upgrade() {
+                controller.borrow_mut().job_done(result);
+            }
+        });
+        if let Err(e) = deliver {
+            log::warn!("cannot deliver a background result: {e}");
+        }
+    });
     let load_cover: CoverLoader = Box::new(move |url, controller| {
         let covers = covers.clone();
         let fetch = {
@@ -71,13 +134,31 @@ pub fn run_ui(cfg: Config) -> Result<(), Box<dyn Error>> {
             log::warn!("cannot load cover: {e}");
         }
     });
-    let controller = Controller::new(app.as_weak(), cfg, send, load_cover);
+    let controller = Controller::new(
+        app.as_weak(),
+        cfg,
+        Paths::from_env(),
+        send,
+        load_cover,
+        background,
+    );
     install_renderer(&app, &controller);
 
     let weak = Rc::downgrade(&controller);
-    app.on_key(move |text| {
+    app.on_key_down(move |text, repeat| {
         weak.upgrade()
-            .is_some_and(|controller| controller.borrow_mut().key(&text))
+            .is_some_and(|controller| controller.borrow_mut().key_down(&text, repeat))
+    });
+    let weak = Rc::downgrade(&controller);
+    app.on_key_up(move |text| {
+        weak.upgrade()
+            .is_some_and(|controller| controller.borrow_mut().key_up(&text))
+    });
+    let weak = Rc::downgrade(&controller);
+    app.on_focus_lost(move || {
+        if let Some(controller) = weak.upgrade() {
+            controller.borrow_mut().focus_lost();
+        }
     });
     let weak = Rc::downgrade(&controller);
     slint::spawn_local(async move {
@@ -188,23 +269,68 @@ struct Controller {
     /// stopped while it is closed.
     frames: Timer,
     frame_interval: Option<Duration>,
+    paths: Paths,
+    background: Background,
+    /// Tells a tap of OK from a hold; the single-shot timer fires when a hold is due.
+    ok_hold: OkHold,
+    hold_timer: Timer,
+    /// Added to the clock the hold detection reads; only tests move it.
+    time_skew: Duration,
+    /// The settings as last shown or changed in the panel.
+    settings: Values,
+    /// The presets switched off, as last saved.
+    disabled: DisabledPresets,
+    pairing: Pairing,
+    /// The settings panel, while it is open.
+    panel: Option<Panel>,
+    /// Why the last save failed, shown in the panel.
+    save_error: Option<String>,
+    calibration: Option<Calibration<LiveAudio>>,
+    /// Runs only while the calibration view is open.
+    calibration_timer: Timer,
+    /// Why the preset folder could not be shown, if it could not.
+    tree_error: Option<String>,
+    demo: DemoState,
+}
+
+/// A preset demo started from the panel's preset tree.
+#[derive(Debug, Default)]
+struct DemoState {
+    /// The preset being shown.
+    name: Option<String>,
+    /// Asked for, but the visualizer has no renderer yet (it is made on the next frame).
+    pending: Option<PathBuf>,
+    failed: bool,
+    /// The visualizer was closed when the demo started; closing the tree closes it again.
+    opened_visualizer: bool,
 }
 
 impl Controller {
     fn new(
         app: slint::Weak<App>,
         cfg: Config,
+        paths: Paths,
         send: CommandSink,
         load_cover: CoverLoader,
+        background: Background,
     ) -> Rc<RefCell<Controller>> {
+        let disabled = DisabledPresets::load(&paths.disabled);
+        let settings = Values {
+            pairing: cfg.daemon.pairing,
+            beat_sensitivity: cfg.visualizer.beat_sensitivity,
+            preset_duration_s: cfg.visualizer.preset_duration_s,
+            shuffle: cfg.visualizer.shuffle,
+            delay_ms: cfg.visualizer.delay_ms,
+        };
         Rc::new_cyclic(|me| {
             RefCell::new(Controller {
                 app,
                 me: me.clone(),
                 viz: Rc::new(RefCell::new(Session::new(
                     &cfg.visualizer,
-                    DisabledPresets::load(&disabled_presets_path()),
+                    disabled.clone(),
                 ))),
+                pairing: Pairing::new(cfg.daemon.pairing),
                 cfg,
                 player: NowPlaying::default(),
                 ui: UiState::default(),
@@ -214,12 +340,32 @@ impl Controller {
                 load_cover,
                 frames: Timer::default(),
                 frame_interval: None,
+                paths,
+                background,
+                ok_hold: OkHold::default(),
+                hold_timer: Timer::default(),
+                time_skew: Duration::ZERO,
+                settings,
+                disabled,
+                panel: None,
+                save_error: None,
+                calibration: None,
+                calibration_timer: Timer::default(),
+                tree_error: None,
+                demo: DemoState::default(),
             })
         })
     }
 
     fn apply(&mut self, ev: PlayerEvent) {
         let now = Instant::now();
+        if matches!(ev, PlayerEvent::Connected | PlayerEvent::Disconnected)
+            && self.pairing.mode() == PairingMode::On
+        {
+            // A Soloist started by hand needs the port opened again; whether the systemd
+            // unit runs it is found out away from the UI thread.
+            (self.background)(Job::ConnectionChanged(ev.clone()), self.me.clone());
+        }
         let before = self.track_names();
         self.player.apply(ev, now, unix_now_ms());
         let after = self.track_names();
@@ -237,12 +383,87 @@ impl Controller {
         Some((track.title.clone(), track.artist.clone()))
     }
 
-    /// Handles a key press; returns false for keys that are not bound.
-    fn key(&mut self, text: &str) -> bool {
+    /// The clock the OK hold is timed with.
+    fn clock(&self) -> Instant {
+        Instant::now() + self.time_skew
+    }
+
+    /// A key went down; returns false for keys that are not bound. OK is the exception to
+    /// acting at once: a tap acts when released, and a hold opens the settings.
+    fn key_down(&mut self, text: &str, repeat: bool) -> bool {
         let Some(key) = key_name(text).and_then(|name| self.cfg.keys.get(&name)) else {
             return false;
         };
+        match key {
+            Key::Ok => {
+                self.ok_hold.press(self.clock(), repeat);
+                if !repeat {
+                    self.arm_hold_timer(HOLD);
+                }
+            }
+            // Holding the settings key must not flip the panel open and shut.
+            Key::Settings if repeat => {}
+            _ => self.act(key),
+        }
+        true
+    }
+
+    /// A key went up. Only OK cares.
+    fn key_up(&mut self, text: &str) -> bool {
+        let Some(key) = key_name(text).and_then(|name| self.cfg.keys.get(&name)) else {
+            return false;
+        };
+        if key == Key::Ok {
+            self.hold_timer.stop();
+            match self.ok_hold.release(self.clock()) {
+                Some(OkGesture::Tap) => self.act(Key::Ok),
+                // The timer did not get to run before the release.
+                Some(OkGesture::Hold) => self.open_panel(),
+                None => {}
+            }
+        }
+        true
+    }
+
+    /// The window lost the keyboard focus: a held OK will never be released here.
+    fn focus_lost(&mut self) {
+        self.ok_hold.reset();
+        self.hold_timer.stop();
+    }
+
+    fn arm_hold_timer(&mut self, after: Duration) {
+        let me = self.me.clone();
+        self.hold_timer
+            .start(TimerMode::SingleShot, after, move || {
+                if let Some(controller) = me.upgrade() {
+                    controller.borrow_mut().hold_due();
+                }
+            });
+    }
+
+    fn hold_due(&mut self) {
+        match self.ok_hold.poll(self.clock()) {
+            Some(OkGesture::Hold) => self.open_panel(),
+            // The timer ran a hair early.
+            _ if self.ok_hold.pending() => self.arm_hold_timer(Duration::from_millis(20)),
+            _ => {}
+        }
+    }
+
+    /// Applies a button press: to the panel when it is open, else to the screen.
+    fn act(&mut self, key: Key) {
         let now = Instant::now();
+        if let Some(panel) = self.panel.as_mut() {
+            let effects = panel.key(key);
+            self.settings = panel.values().clone();
+            self.apply_effects(effects, now);
+        } else {
+            self.act_on_screen(key, now);
+        }
+        self.refresh();
+    }
+
+    fn act_on_screen(&mut self, key: Key, now: Instant) {
         // The screen switch itself already happened in `handle_key`.
         match handle_key(&mut self.ui, key, &self.cfg) {
             // The idle screen has no controls. A command sent while another device plays
@@ -251,12 +472,7 @@ impl Controller {
                 log::debug!("ignoring {cmd:?}: nothing is playing here");
             }
             Action::Send(cmd) => (self.send)(cmd),
-            Action::OpenVisualizer => {
-                let track = self.track_names();
-                let mut viz = self.viz.borrow_mut();
-                let delay_ms = viz.delay_ms();
-                viz.open(now, || LiveAudio::start(delay_ms), track);
-            }
+            Action::OpenVisualizer => self.open_visualizer(now),
             Action::CloseVisualizer => self.viz.borrow_mut().close(),
             Action::PreviousPreset => self.viz.borrow_mut().prev_preset(now),
             Action::NextPreset => self.viz.borrow_mut().next_preset(now),
@@ -264,17 +480,320 @@ impl Controller {
             Action::BeatSensitivityDelta(delta) => {
                 self.viz.borrow_mut().adjust_beat_sensitivity(now, delta);
             }
-            // Wired up with the settings panel.
-            Action::OpenSettings | Action::None => {}
+            Action::OpenSettings => self.open_panel(),
+            Action::None => {}
+        }
+    }
+
+    fn open_visualizer(&mut self, now: Instant) {
+        let track = self.track_names();
+        let mut viz = self.viz.borrow_mut();
+        let delay_ms = viz.delay_ms();
+        viz.open(now, || LiveAudio::start(delay_ms), track);
+    }
+
+    // ---------------------------------------------------------------- settings panel
+
+    fn open_panel(&mut self) {
+        if self.panel.is_none() {
+            self.save_error = None;
+            self.panel = Some(Panel::new(self.settings.clone()));
         }
         self.refresh();
-        true
+    }
+
+    fn close_panel(&mut self) {
+        self.stop_calibration();
+        self.stop_demo();
+        self.panel = None;
+        self.save_error = None;
+    }
+
+    fn apply_effects(&mut self, effects: Vec<Effect>, now: Instant) {
+        for effect in effects {
+            match effect {
+                Effect::Close => self.close_panel(),
+                Effect::Pairing(mode) => {
+                    self.save(Setting::Pairing(mode));
+                    if let Some(cmd) = self.pairing.set_mode(mode) {
+                        (self.background)(Job::Helper(cmd), self.me.clone());
+                    }
+                }
+                Effect::BeatSensitivity(value) => {
+                    self.save(Setting::BeatSensitivity(value));
+                    self.viz.borrow_mut().set_beat_sensitivity(value);
+                }
+                Effect::PresetDuration(seconds) => {
+                    self.save(Setting::PresetDurationS(seconds));
+                    self.viz.borrow_mut().set_preset_duration(seconds);
+                }
+                Effect::Shuffle(on) => {
+                    self.save(Setting::Shuffle(on));
+                    self.viz.borrow_mut().set_shuffle(on);
+                }
+                Effect::Delay(ms) => {
+                    self.save(Setting::DelayMs(ms));
+                    self.viz.borrow_mut().set_delay(ms);
+                    if let Some(calibration) = self.calibration.as_mut() {
+                        calibration.set_delay(ms);
+                    }
+                }
+                Effect::StartCalibration => self.start_calibration(),
+                Effect::StopCalibration => self.stop_calibration(),
+                Effect::OpenPresets => self.open_presets(),
+                Effect::PresetsChanged => self.presets_changed(),
+                Effect::Demo(path) => self.start_demo(&path, now),
+                Effect::ClosePresets => self.stop_demo(),
+            }
+        }
+    }
+
+    /// Writes one setting to `config.toml`. The value applies for this session either way; a
+    /// failure is shown in the panel.
+    fn save(&mut self, setting: Setting) {
+        match save_setting(&self.paths.config, setting) {
+            Ok(()) => self.save_error = None,
+            Err(e) => {
+                log::warn!("{e}");
+                self.save_error = Some(e.to_string());
+            }
+        }
+    }
+
+    fn start_calibration(&mut self) {
+        match LiveAudio::start(self.settings.delay_ms) {
+            Ok(audio) => {
+                self.calibration = Some(Calibration::new(audio));
+                let me = self.me.clone();
+                self.calibration_timer
+                    .start(TimerMode::Repeated, CALIBRATION_TICK, move || {
+                        if let Some(controller) = me.upgrade() {
+                            controller.borrow_mut().calibration_tick();
+                        }
+                    });
+            }
+            // Without a stream to listen to, the view says it is waiting for music.
+            Err(e) => log::info!("calibration cannot capture audio: {e}"),
+        }
+    }
+
+    fn stop_calibration(&mut self) {
+        self.calibration_timer.stop();
+        self.calibration = None;
+    }
+
+    fn calibration_tick(&mut self) {
+        let now = Instant::now();
+        let (Some(calibration), Some(app)) = (self.calibration.as_mut(), self.app.upgrade()) else {
+            return;
+        };
+        calibration.tick(now);
+        app.set_calib_flash(calibration.flash(now));
+        app.set_calib_waiting(calibration.waiting());
+    }
+
+    fn open_presets(&mut self) {
+        self.tree_error = None;
+        let tree = match viz::find_presets(&self.cfg.visualizer) {
+            Ok((root, presets)) => PresetTree::build(&root, &presets, &self.disabled),
+            Err(e) => {
+                self.tree_error = Some(e.to_string());
+                PresetTree::build(Path::new(""), &[], &self.disabled)
+            }
+        };
+        if let Some(panel) = self.panel.as_mut() {
+            panel.set_tree(tree);
+        }
+    }
+
+    fn presets_changed(&mut self) {
+        let Some(tree) = self.panel.as_ref().and_then(Panel::tree) else {
+            return;
+        };
+        let disabled = tree.to_disabled(&self.disabled);
+        match disabled.save(&self.paths.disabled) {
+            Ok(()) => self.save_error = None,
+            Err(e) => {
+                log::warn!("cannot save {}: {e}", self.paths.disabled.display());
+                self.save_error = Some(format!("Not saved: {e}"));
+            }
+        }
+        self.disabled = disabled.clone();
+        self.viz.borrow_mut().set_disabled(disabled);
+    }
+
+    /// Shows one preset in the visualizer, opening it first if it is closed.
+    fn start_demo(&mut self, path: &Path, now: Instant) {
+        if !self.viz.borrow().is_open() {
+            self.ui.screen = Screen::Visualizer;
+            self.open_visualizer(now);
+            self.demo.opened_visualizer = true;
+        }
+        let name = path.file_stem().unwrap_or(path.as_os_str());
+        self.demo.name = Some(name.to_string_lossy().into_owned());
+        self.demo.failed = false;
+        self.demo.pending = None;
+        self.try_demo(path.to_owned());
+    }
+
+    /// Hands the preset to the renderer, or keeps it for when there is one.
+    fn try_demo(&mut self, path: PathBuf) {
+        match self.viz.borrow_mut().demo(&path) {
+            Ok(()) => {}
+            // The renderer is made on the next frame.
+            Err(VizError::NotOpen) => self.demo.pending = Some(path),
+            Err(e) => {
+                log::warn!("{e}");
+                self.demo.failed = true;
+            }
+        }
+    }
+
+    /// Ends the demo; a visualizer that was opened only for it closes again.
+    fn stop_demo(&mut self) {
+        self.viz.borrow_mut().end_demo();
+        let opened = self.demo.opened_visualizer;
+        self.demo = DemoState::default();
+        if opened {
+            self.viz.borrow_mut().close();
+            self.ui.screen = Screen::NowPlaying;
+        }
+    }
+
+    /// The result of a background job.
+    fn job_done(&mut self, result: JobResult) {
+        match result {
+            JobResult::Helper(status) => self.pairing.set_status(status),
+            JobResult::Connection(ev, unit_active) => {
+                if let Some(cmd) = self.pairing.on_event(&ev, unit_active) {
+                    (self.background)(Job::Helper(cmd), self.me.clone());
+                }
+            }
+        }
+        self.refresh();
+    }
+
+    /// Pushes the panel's state into the window.
+    fn refresh_settings(&self, app: &App, now: Instant) {
+        app.set_settings_open(self.panel.is_some());
+        let Some(panel) = &self.panel else {
+            return;
+        };
+        let v = panel.values();
+        let on_off = |on: bool| if on { "On" } else { "Off" }.to_owned();
+        match panel.view() {
+            PanelView::Main(focused) => {
+                app.set_settings_view(0);
+                let value = |row: Row| match row {
+                    Row::Pairing => on_off(v.pairing == PairingMode::On),
+                    Row::BeatSensitivity => format!("{:.1}", v.beat_sensitivity),
+                    Row::PresetDuration => format!("{:.0} s", v.preset_duration_s),
+                    Row::Shuffle => on_off(v.shuffle),
+                    Row::VisualDelay => format!("{} ms", v.delay_ms),
+                    Row::Calibrate | Row::Presets => "›".to_owned(),
+                };
+                let label = |row: Row| match row {
+                    Row::Pairing => "Pairing",
+                    Row::BeatSensitivity => "Beat sensitivity",
+                    Row::PresetDuration => "Preset duration",
+                    Row::Shuffle => "Shuffle",
+                    Row::VisualDelay => "Visual delay",
+                    Row::Calibrate => "Calibrate delay",
+                    Row::Presets => "Presets",
+                };
+                let rows: Vec<SettingsRow> = Row::ALL
+                    .iter()
+                    .map(|&row| SettingsRow {
+                        label: label(row).into(),
+                        value: value(row).into(),
+                        focused: row == focused,
+                    })
+                    .collect();
+                app.set_settings_rows(ModelRc::new(VecModel::from(rows)));
+                let status = self
+                    .save_error
+                    .clone()
+                    .unwrap_or_else(|| self.pairing.status_line());
+                app.set_settings_status(status.into());
+            }
+            PanelView::Calibrate => {
+                app.set_settings_view(1);
+                app.set_calib_delay(format!("{} ms", v.delay_ms).into());
+                // Without a capture there is nothing to hear: it waits for music.
+                match &self.calibration {
+                    Some(calibration) => {
+                        app.set_calib_waiting(calibration.waiting());
+                        app.set_calib_flash(calibration.flash(now));
+                    }
+                    None => {
+                        app.set_calib_waiting(true);
+                        app.set_calib_flash(false);
+                    }
+                }
+            }
+            PanelView::Presets => {
+                app.set_settings_view(2);
+                let rows: Vec<TreeRowData> = panel
+                    .tree()
+                    .map(|tree| tree.visible_rows(TREE_WINDOW))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|row| TreeRowData {
+                        depth: i32::try_from(row.depth).unwrap_or(0),
+                        label: row.label.into(),
+                        check: match row.check {
+                            Check::On => 0,
+                            Check::Off => 1,
+                            Check::Mixed => 2,
+                        },
+                        folder: row.folder.is_some(),
+                        expanded: row.folder.is_some_and(|f| f.expanded),
+                        focused: row.focused,
+                        demo: row.demo,
+                    })
+                    .collect();
+                app.set_tree_rows(ModelRc::new(VecModel::from(rows)));
+                app.set_tree_summary(self.tree_summary().into());
+                app.set_tree_note(self.tree_note(now).into());
+            }
+        }
+    }
+
+    fn tree_summary(&self) -> String {
+        if let Some(name) = &self.demo.name {
+            return format!("Demo: {name}");
+        }
+        let Some(tree) = self.panel.as_ref().and_then(Panel::tree) else {
+            return "Looking for presets…".to_owned();
+        };
+        match tree.counts() {
+            (0, _) => "No presets".to_owned(),
+            (total, 0) => format!("{total} presets"),
+            (total, off) => format!("{total} presets, {off} off"),
+        }
+    }
+
+    fn tree_note(&self, now: Instant) -> String {
+        if self.demo.failed {
+            "Could not load this preset".to_owned()
+        } else if let Some(error) = &self.save_error {
+            error.clone()
+        } else if let Some(error) = &self.tree_error {
+            error.clone()
+        } else if self.demo.name.is_some() && !self.viz.borrow().view(now).rendering {
+            "Play music to see it move".to_owned()
+        } else {
+            String::new()
+        }
     }
 
     /// One visualizer tick: picks up audio changes, updates the overlays and asks for a frame
     /// when there is something to draw (or a renderer to create).
     fn viz_tick(&mut self) {
         self.viz.borrow_mut().poll();
+        if let Some(path) = self.demo.pending.take() {
+            self.try_demo(path);
+        }
         let view = self.refresh_viz(Instant::now());
         let needs_renderer = self.viz.borrow().needs_renderer();
         if (view.rendering || needs_renderer)
@@ -357,6 +876,7 @@ impl Controller {
         let player = &self.player;
         app.set_connected(player.connected);
         app.set_idle(player.track.is_none());
+        app.set_not_paired(player.logged_in == Some(false));
         app.set_visualizer(self.ui.screen == Screen::Visualizer);
         app.set_device_name(player.device_name.clone().unwrap_or_default().into());
         app.set_focused_button(match self.ui.focus {
@@ -396,6 +916,7 @@ impl Controller {
 
         self.schedule_tick(now);
         self.refresh_viz(now);
+        self.refresh_settings(&app, now);
     }
 
     /// Ticks only while the progress is on screen and moving, at the next whole second of
@@ -482,13 +1003,37 @@ mod tests {
     use super::*;
     use crate::model::Track;
     use i_slint_backend_testing::ElementHandle;
+    use slint::Model;
     use slint::platform::Key;
+
+    /// A fresh folder for one test's settings files.
+    fn test_dir() -> PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "htpc-ui-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
 
     struct Harness {
         app: App,
         controller: Rc<RefCell<Controller>>,
         sent: Rc<RefCell<Vec<Command>>>,
         covers_requested: Rc<RefCell<Vec<String>>>,
+        /// Background jobs asked for; nothing runs them, tests deliver results by hand.
+        jobs: Rc<RefCell<Vec<Job>>>,
+        /// Holds this test's `config.toml` and `disabled-presets.txt`.
+        dir: PathBuf,
+    }
+
+    impl Drop for Harness {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
     }
 
     impl Harness {
@@ -503,13 +1048,21 @@ mod tests {
                 .set_size(slint::LogicalSize::new(1920.0, 1080.0));
             let sent = Rc::new(RefCell::new(Vec::new()));
             let covers_requested = Rc::new(RefCell::new(Vec::new()));
+            let jobs = Rc::new(RefCell::new(Vec::new()));
             let sink = sent.clone();
             let requests = covers_requested.clone();
+            let queue = jobs.clone();
+            let dir = test_dir();
             let controller = Controller::new(
                 app.as_weak(),
                 cfg,
+                Paths {
+                    config: dir.join("config.toml"),
+                    disabled: dir.join("disabled-presets.txt"),
+                },
                 Box::new(move |cmd| sink.borrow_mut().push(cmd)),
                 Box::new(move |url, _| requests.borrow_mut().push(url)),
+                Box::new(move |job, _| queue.borrow_mut().push(job)),
             );
             // The testing backend has no OpenGL: the visualizer explains that.
             install_renderer(&app, &controller);
@@ -519,7 +1072,43 @@ mod tests {
                 controller,
                 sent,
                 covers_requested,
+                jobs,
+                dir,
             }
+        }
+
+        fn config_text(&self) -> String {
+            std::fs::read_to_string(self.dir.join("config.toml")).unwrap_or_default()
+        }
+
+        /// A key held down for the hold time, then released.
+        fn hold(&self, key: Key) -> bool {
+            let text: slint::SharedString = key.into();
+            let handled = self.controller.borrow_mut().key_down(&text, false);
+            let time = HOLD + Duration::from_millis(100);
+            self.controller.borrow_mut().time_skew += time;
+            i_slint_backend_testing::mock_elapsed_time(time);
+            self.controller.borrow_mut().key_up(&text);
+            handled
+        }
+
+        fn settings_rows(&self) -> Vec<(String, String, bool)> {
+            self.app
+                .get_settings_rows()
+                .iter()
+                .map(|r| (r.label.to_string(), r.value.to_string(), r.focused))
+                .collect()
+        }
+
+        /// Moves down the settings list to `label`.
+        fn go_to(&self, label: &str) {
+            for _ in 0..8 {
+                if self.settings_rows().iter().any(|r| r.2 && r.0 == label) {
+                    return;
+                }
+                self.press(Key::DownArrow);
+            }
+            panic!("no settings row {label}");
         }
 
         fn apply(&self, events: impl IntoIterator<Item = PlayerEvent>) {
@@ -528,9 +1117,12 @@ mod tests {
             }
         }
 
+        /// A quick press: down and up.
         fn press(&self, key: Key) -> bool {
             let text: slint::SharedString = key.into();
-            self.controller.borrow_mut().key(&text)
+            let handled = self.controller.borrow_mut().key_down(&text, false);
+            self.controller.borrow_mut().key_up(&text);
+            handled
         }
 
         fn playing(&self, track: Track) {
@@ -773,7 +1365,7 @@ mod tests {
     fn unbound_keys_are_not_consumed() {
         let h = harness();
         assert!(!h.press(Key::F5));
-        assert!(!h.controller.borrow_mut().key("q"));
+        assert!(!h.controller.borrow_mut().key_down("q", false));
     }
 
     fn open_visualizer(h: &Harness) {
@@ -959,10 +1551,16 @@ mod tests {
         let app = App::new().unwrap();
         app.show().unwrap();
         window.set_size(slint::PhysicalSize::new(width as u32, height as u32));
+        let dir = test_dir();
         let controller = Controller::new(
             app.as_weak(),
             Config::default(),
+            Paths {
+                config: dir.join("config.toml"),
+                disabled: dir.join("disabled-presets.txt"),
+            },
             Box::new(|_| {}),
+            Box::new(|_, _| {}),
             Box::new(|_, _| {}),
         );
 
@@ -994,6 +1592,388 @@ mod tests {
             "title drew {} bright pixels",
             with_title.saturating_sub(without_title)
         );
+    }
+
+    // ---------------------------------------------------------------- settings panel
+
+    use crate::config::VisualizerConfig;
+
+    /// A config whose preset folder holds empty `.milk` files at these paths.
+    fn config_with_presets(files: &[&str]) -> (Config, PathBuf) {
+        let dir = test_dir();
+        for file in files {
+            let path = dir.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "").unwrap();
+        }
+        let cfg = Config {
+            visualizer: VisualizerConfig {
+                preset_dir: Some(dir.clone()),
+                ..Config::default().visualizer
+            },
+            ..Config::default()
+        };
+        (cfg, dir)
+    }
+
+    fn open_settings(h: &Harness) {
+        h.hold(Key::Return);
+        assert!(h.exists("App::settings-panel"));
+    }
+
+    #[test]
+    fn hold_ok_opens_settings_tap_does_not() {
+        let h = harness();
+        h.playing(track("A"));
+        h.press(Key::Return);
+        assert_eq!(*h.sent.borrow(), [Command::PlayPause]);
+        assert!(!h.exists("App::settings-panel"));
+
+        assert!(h.hold(Key::Return));
+        assert!(h.exists("App::settings-panel"));
+        assert_eq!(h.sent.borrow().len(), 1, "a hold sends nothing");
+        assert_eq!(h.app.get_settings_view(), 0);
+    }
+
+    #[test]
+    fn settings_key_toggles_the_panel() {
+        let h = harness();
+        assert!(h.press(Key::Menu));
+        assert!(h.exists("App::settings-panel"));
+        assert!(h.press(Key::Menu));
+        assert!(!h.exists("App::settings-panel"));
+    }
+
+    #[test]
+    fn focus_loss_cancels_a_hold() {
+        let h = harness();
+        h.playing(track("A"));
+        let text: slint::SharedString = Key::Return.into();
+        h.controller.borrow_mut().key_down(&text, false);
+        h.controller.borrow_mut().focus_lost();
+        h.controller.borrow_mut().time_skew += Duration::from_millis(700);
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(700));
+        h.controller.borrow_mut().key_up(&text);
+        assert!(!h.exists("App::settings-panel"));
+        assert!(h.sent.borrow().is_empty(), "and the lost press is no tap");
+        // The next press starts fresh.
+        h.press(Key::Return);
+        assert_eq!(*h.sent.borrow(), [Command::PlayPause]);
+    }
+
+    #[test]
+    fn settings_rows_show_values() {
+        let h = harness();
+        open_settings(&h);
+        let rows = h.settings_rows();
+        let shown: Vec<(&str, &str)> = rows
+            .iter()
+            .map(|(label, value, _)| (label.as_str(), value.as_str()))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("Pairing", "Off"),
+                ("Beat sensitivity", "1.0"),
+                ("Preset duration", "30 s"),
+                ("Shuffle", "On"),
+                ("Visual delay", "0 ms"),
+                ("Calibrate delay", "›"),
+                ("Presets", "›"),
+            ]
+        );
+        assert_eq!(rows.iter().filter(|r| r.2).count(), 1);
+        assert!(rows[0].2, "opens on the first row");
+        assert_eq!(h.app.get_settings_status(), "Off");
+    }
+
+    #[test]
+    fn changing_delay_saves_config() {
+        let h = harness();
+        open_settings(&h);
+        h.go_to("Visual delay");
+        for _ in 0..3 {
+            h.press(Key::RightArrow);
+        }
+        assert!(
+            h.config_text().contains("delay_ms = 30"),
+            "{}",
+            h.config_text()
+        );
+        assert_eq!(
+            h.controller.borrow().viz.borrow().delay_ms(),
+            30,
+            "applied live"
+        );
+        let rows = h.settings_rows();
+        assert_eq!(rows[4].1, "30 ms");
+    }
+
+    #[test]
+    fn invalid_config_shows_not_saved() {
+        let h = harness();
+        std::fs::write(h.dir.join("config.toml"), "[[[\n").unwrap();
+        open_settings(&h);
+        h.go_to("Visual delay");
+        h.press(Key::RightArrow);
+        assert_eq!(
+            h.app.get_settings_status(),
+            "Not saved: config.toml has an error"
+        );
+        assert_eq!(h.settings_rows()[4].1, "10 ms", "the value still applies");
+        assert_eq!(h.config_text(), "[[[\n", "the broken file is left alone");
+    }
+
+    #[test]
+    fn pairing_toggle_saves_and_calls_helper() {
+        let h = harness();
+        open_settings(&h);
+        h.press(Key::Return);
+        assert!(
+            h.config_text().contains("pairing = \"on\""),
+            "{}",
+            h.config_text()
+        );
+        assert_eq!(*h.jobs.borrow(), [Job::Helper(HelperCommand::Open)]);
+        assert_eq!(h.settings_rows()[0].1, "On");
+
+        // The helper's answer shows under the rows.
+        h.controller
+            .borrow_mut()
+            .job_done(JobResult::Helper(HelperStatus::Open { port: 51117 }));
+        assert_eq!(
+            h.app.get_settings_status(),
+            "On: port 51117 open to the local network"
+        );
+
+        h.press(Key::Return);
+        assert!(h.config_text().contains("pairing = \"off\""));
+        assert_eq!(h.jobs.borrow()[1], Job::Helper(HelperCommand::Close));
+    }
+
+    #[test]
+    fn helper_not_installed_is_explained() {
+        let h = harness();
+        open_settings(&h);
+        h.press(Key::Return);
+        h.controller
+            .borrow_mut()
+            .job_done(JobResult::Helper(HelperStatus::NotInstalled));
+        assert_eq!(
+            h.app.get_settings_status(),
+            "Pairing helper not installed: see README"
+        );
+    }
+
+    #[test]
+    fn connection_changes_reopen_the_port_for_a_hand_run_soloist() {
+        let h = Harness::new(Config {
+            daemon: crate::config::DaemonConfig {
+                pairing: PairingMode::On,
+                ..Config::default().daemon
+            },
+            ..Config::default()
+        });
+        h.apply([PlayerEvent::Connected]);
+        assert_eq!(
+            *h.jobs.borrow(),
+            [Job::ConnectionChanged(PlayerEvent::Connected)]
+        );
+        // The unit runs Soloist: the unit owns the rule.
+        h.controller
+            .borrow_mut()
+            .job_done(JobResult::Connection(PlayerEvent::Connected, true));
+        assert_eq!(h.jobs.borrow().len(), 1);
+        // Started by hand: open it again.
+        h.controller
+            .borrow_mut()
+            .job_done(JobResult::Connection(PlayerEvent::Connected, false));
+        assert_eq!(h.jobs.borrow()[1], Job::Helper(HelperCommand::Open));
+
+        // With pairing Off nothing is checked at all.
+        let h = harness();
+        h.apply([PlayerEvent::Connected, PlayerEvent::Disconnected]);
+        assert!(h.jobs.borrow().is_empty());
+    }
+
+    #[test]
+    fn back_closes_settings_and_keys_resume() {
+        let h = harness();
+        h.playing(track("A"));
+        open_settings(&h);
+        h.press(Key::RightArrow);
+        assert!(h.sent.borrow().is_empty());
+        assert!(
+            h.ring_inside("App::play-button"),
+            "keys did not move the focus behind"
+        );
+        h.press(Key::Escape);
+        assert!(!h.exists("App::settings-panel"));
+        h.press(Key::Return);
+        assert_eq!(*h.sent.borrow(), [Command::PlayPause]);
+    }
+
+    #[test]
+    fn presets_view_navigation() {
+        let (cfg, _dir) = config_with_presets(&["A/a1.milk", "A/b1.milk", "top.milk"]);
+        let h = Harness::new(cfg);
+        open_settings(&h);
+        h.go_to("Presets");
+        h.press(Key::Return);
+        assert_eq!(h.app.get_settings_view(), 2);
+        let labels = |h: &Harness| -> Vec<String> {
+            h.app
+                .get_tree_rows()
+                .iter()
+                .map(|r| r.label.to_string())
+                .collect()
+        };
+        assert_eq!(labels(&h), ["A (2)", "top"]);
+        assert_eq!(h.app.get_tree_summary(), "3 presets");
+
+        h.press(Key::RightArrow); // expand A
+        assert_eq!(labels(&h), ["A (2)", "a1", "b1", "top"]);
+        h.press(Key::DownArrow);
+        h.press(Key::Return); // switch a1 off
+        assert_eq!(
+            std::fs::read_to_string(h.dir.join("disabled-presets.txt")).unwrap(),
+            "A/a1.milk\n"
+        );
+        assert_eq!(h.app.get_tree_summary(), "3 presets, 1 off");
+        assert_eq!(labels(&h)[0], "A (2, 1 off)");
+        assert!(
+            h.controller
+                .borrow()
+                .viz
+                .borrow()
+                .disabled()
+                .contains("A/a1.milk"),
+            "the visualizer is told"
+        );
+
+        h.press(Key::Escape);
+        assert_eq!(h.app.get_settings_view(), 0);
+    }
+
+    #[test]
+    fn demo_opened_visualizer_closes_on_back() {
+        let (cfg, _dir) = config_with_presets(&["A/a1.milk"]);
+        let h = Harness::new(cfg);
+        assert!(h.exists("App::idle-view"));
+        open_settings(&h);
+        h.go_to("Presets");
+        h.press(Key::Return);
+        h.press(Key::RightArrow); // expand A
+        h.press(Key::DownArrow); // a1
+        h.press(Key::RightArrow); // demo it
+
+        assert!(h.exists("App::settings-panel"), "the panel stays open");
+        assert!(h.exists("App::viz-view"), "the visualizer opened behind it");
+        assert!(h.controller.borrow().viz.borrow().is_open());
+        assert_eq!(h.app.get_tree_summary(), "Demo: a1");
+        assert_eq!(h.app.get_tree_note(), "Play music to see it move");
+
+        h.press(Key::Escape);
+        assert!(!h.controller.borrow().viz.borrow().is_open());
+        assert!(!h.exists("App::viz-view"));
+        assert!(h.exists("App::idle-view"), "back where it started");
+        assert!(h.exists("App::settings-panel"), "Back only left the tree");
+        assert_eq!(h.app.get_settings_view(), 0);
+    }
+
+    #[test]
+    fn demo_leaves_an_already_open_visualizer_open() {
+        let (cfg, _dir) = config_with_presets(&["a1.milk"]);
+        let h = Harness::new(cfg);
+        h.playing(track("A"));
+        open_visualizer(&h);
+        open_settings(&h);
+        h.go_to("Presets");
+        h.press(Key::Return);
+        h.press(Key::RightArrow);
+        h.press(Key::Escape);
+        assert!(
+            h.controller.borrow().viz.borrow().is_open(),
+            "it was open before"
+        );
+        assert!(h.exists("App::viz-view"));
+    }
+
+    #[test]
+    fn closing_the_panel_from_the_tree_ends_the_demo() {
+        let (cfg, _dir) = config_with_presets(&["a1.milk"]);
+        let h = Harness::new(cfg);
+        open_settings(&h);
+        h.go_to("Presets");
+        h.press(Key::Return);
+        h.press(Key::DownArrow);
+        h.press(Key::RightArrow);
+        assert!(h.controller.borrow().viz.borrow().is_open());
+        h.press(Key::Menu); // the settings key closes everything
+        assert!(!h.exists("App::settings-panel"));
+        assert!(!h.controller.borrow().viz.borrow().is_open());
+        assert!(h.exists("App::idle-view"));
+    }
+
+    #[test]
+    fn calibrate_view_shows_waiting_without_audio() {
+        let h = harness();
+        open_settings(&h);
+        h.go_to("Calibrate delay");
+        h.press(Key::Return);
+        assert_eq!(h.app.get_settings_view(), 1);
+        assert_eq!(h.label("App::calib-waiting-text"), "Waiting for music…");
+        assert!(!h.app.get_calib_flash());
+        h.press(Key::RightArrow);
+        assert_eq!(h.app.get_calib_delay(), "10 ms");
+        assert!(h.config_text().contains("delay_ms = 10"));
+
+        h.press(Key::Escape);
+        assert_eq!(h.app.get_settings_view(), 0);
+        assert!(h.settings_rows()[5].2, "back on the Calibrate row");
+        assert!(!h.controller.borrow().calibration_timer.running());
+        assert!(h.controller.borrow().calibration.is_none());
+    }
+
+    #[test]
+    fn idle_shows_not_paired_hint() {
+        let h = harness();
+        h.apply([
+            PlayerEvent::Connected,
+            PlayerEvent::LoggedIn(true),
+            PlayerEvent::DeviceActive(false),
+        ]);
+        assert!(!h.exists("App::idle-not-paired"));
+        h.apply([PlayerEvent::LoggedIn(false)]);
+        assert_eq!(
+            h.label("App::idle-not-paired"),
+            "Not paired: hold OK and turn pairing on"
+        );
+    }
+
+    #[test]
+    fn idle_shows_settings_hint() {
+        let h = harness();
+        assert_eq!(h.label("App::idle-settings-hint"), "Hold OK for settings");
+        h.playing(track("A"));
+        assert!(!h.exists("App::idle-settings-hint"));
+    }
+
+    #[test]
+    fn no_timers_while_settings_closed() {
+        let h = harness();
+        h.playing(track("A"));
+        let idle = |h: &Harness| {
+            let c = h.controller.borrow();
+            !c.hold_timer.running() && !c.calibration_timer.running()
+        };
+        assert!(idle(&h));
+        h.press(Key::Return); // a tap
+        assert!(idle(&h), "a tap leaves no hold timer behind");
+        open_settings(&h);
+        assert!(idle(&h), "an open panel runs nothing by itself");
+        h.press(Key::Escape);
+        assert!(idle(&h));
     }
 
     #[test]

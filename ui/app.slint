@@ -20,6 +20,30 @@ global Icons {
     out property <string> pause: "M6 4 L10 4 L10 20 L6 20 Z M14 4 L18 4 L18 20 L14 20 Z";
     out property <string> visualizer: "M12 2 L14.2 9.8 L22 12 L14.2 14.2 L12 22 L9.8 14.2 L2 12 L9.8 9.8 Z";
     out property <string> note: "M9 3 L21 1 L21 16 A3 3 0 1 1 19 13.2 L19 5.4 L11 6.7 L11 18 A3 3 0 1 1 9 15.2 Z";
+    // A d-pad: the cross, and its centre button.
+    out property <string> dpad: "M9 2 L15 2 L15 9 L22 9 L22 15 L15 15 L15 22 L9 22 L9 15 L2 15 L2 9 L9 9 Z";
+    out property <string> dpad-centre: "M9.5 9.5 L14.5 9.5 L14.5 14.5 L9.5 14.5 Z";
+    out property <string> arrow-right: "M8 5 L17 12 L8 19 Z";
+    out property <string> arrow-down: "M5 8 L19 8 L12 17 Z";
+    out property <string> tick: "M4 12 L6.5 9.5 L10 13 L17.5 5.5 L20 8 L10 18 Z";
+}
+
+// One row of the settings list.
+export struct SettingsRow {
+    label: string,
+    value: string,
+    focused: bool,
+}
+
+// One row of the preset tree. check: 0 on, 1 off, 2 mixed.
+export struct TreeRowData {
+    depth: int,
+    label: string,
+    check: int,
+    folder: bool,
+    expanded: bool,
+    focused: bool,
+    demo: bool,
 }
 
 component Icon inherits Path {
@@ -47,6 +71,105 @@ component RowButton inherits Rectangle {
         width: 52px * s;
         height: self.width;
         commands: icon;
+    }
+}
+
+component PanelRow inherits Rectangle {
+    in property <float> s;
+    in property <string> label;
+    in property <string> value;
+    in property <bool> focused;
+    height: 84px * s;
+    border-radius: 14px * s;
+    background: focused ? #ffffff1f : transparent;
+
+    if focused: Rectangle {
+        border-radius: parent.border-radius;
+        border-width: 3px * s;
+        border-color: Theme.accent;
+    }
+
+    HorizontalLayout {
+        padding-left: 28px * s;
+        padding-right: 28px * s;
+        spacing: 16px * s;
+        Text {
+            text: label;
+            font-size: 34px * s;
+            color: Theme.text;
+            vertical-alignment: center;
+            overflow: elide;
+            wrap: no-wrap;
+        }
+        Text {
+            text: value;
+            font-size: 34px * s;
+            color: focused ? Theme.accent : Theme.dim;
+            vertical-alignment: center;
+            horizontal-alignment: right;
+            overflow: elide;
+            wrap: no-wrap;
+        }
+    }
+}
+
+component TreeRowView inherits Rectangle {
+    in property <float> s;
+    in property <TreeRowData> item;
+    height: 52px * s;
+    border-radius: 10px * s;
+    background: item.focused ? #ffffff1f : transparent;
+
+    HorizontalLayout {
+        padding-left: (16px + item.depth * 36px) * s;
+        padding-right: 16px * s;
+        spacing: 14px * s;
+        alignment: start;
+
+        Rectangle {
+            width: 24px * s;
+            if item.folder: Icon {
+                width: 24px * s;
+                height: self.width;
+                commands: item.expanded ? Icons.arrow-down : Icons.arrow-right;
+                fill: Theme.dim;
+            }
+        }
+        // On: filled with a tick. Off: empty. Mixed: a dash.
+        Rectangle {
+            width: 32px * s;
+            height: self.width;
+            y: (parent.height - self.height) / 2;
+            border-radius: 6px * s;
+            border-width: 3px * s;
+            border-color: item.check == 1 ? Theme.faint : Theme.accent;
+            background: item.check == 0 ? Theme.accent : transparent;
+            if item.check == 0: Icon {
+                width: 24px * s;
+                height: self.width;
+                commands: Icons.tick;
+                fill: Theme.background;
+            }
+            if item.check == 2: Rectangle {
+                width: 16px * s;
+                height: 4px * s;
+                background: Theme.accent;
+            }
+        }
+        Text {
+            text: item.label;
+            font-size: 30px * s;
+            color: item.check == 1 ? Theme.faint : Theme.text;
+            vertical-alignment: center;
+            overflow: elide;
+            wrap: no-wrap;
+        }
+        if item.demo: Icon {
+            width: 24px * s;
+            height: self.width;
+            commands: Icons.play;
+            fill: Theme.accent;
+        }
     }
 }
 
@@ -82,18 +205,47 @@ export component App inherits Window {
     in property <bool> viz-status-visible;
     in property <string> viz-status;
 
-    // Receives the key's text; returns true if the key was handled.
-    callback key(string) -> bool;
+    // Idle screen: Soloist is running but no account is paired with it.
+    in property <bool> not-paired;
+    // Settings panel (right side). settings-view: 0 list, 1 calibration, 2 presets.
+    in property <bool> settings-open;
+    in property <int> settings-view;
+    in property <[SettingsRow]> settings-rows;
+    in property <string> settings-status;
+    in property <string> calib-delay;
+    in property <bool> calib-flash;
+    in property <bool> calib-waiting;
+    in property <[TreeRowData]> tree-rows;
+    in property <string> tree-summary;
+    in property <string> tree-note;
+
+    // Receive the key's text (and whether it is an auto-repeat); return true if the key was
+    // handled.
+    callback key-down(string, bool) -> bool;
+    callback key-up(string) -> bool;
+    // The window lost the keyboard focus: a held key will never be released here.
+    callback focus-lost();
 
     property <float> s: min(root.width / 1920px, root.height / 1080px);
 
     forward-focus: keys;
     keys := FocusScope {
         key-pressed(event) => {
-            if (root.key(event.text)) {
+            if (root.key-down(event.text, event.repeat)) {
                 return accept;
             }
             return reject;
+        }
+        key-released(event) => {
+            if (root.key-up(event.text)) {
+                return accept;
+            }
+            return reject;
+        }
+        changed has-focus => {
+            if (!self.has-focus) {
+                root.focus-lost();
+            }
         }
     }
 
@@ -213,24 +365,62 @@ export component App inherits Window {
         }
     }
 
-    if root.idle && !root.visualizer: idle-view := VerticalLayout {
-        alignment: center;
-        spacing: 24px * root.s;
-        padding: 120px * root.s;
-        idle-hint := Text {
-            text: "Open Spotify and pick";
-            font-size: 48px * root.s;
-            color: Theme.dim;
-            horizontal-alignment: center;
+    if root.idle && !root.visualizer: idle-view := Rectangle {
+        VerticalLayout {
+            alignment: center;
+            spacing: 24px * root.s;
+            padding: 120px * root.s;
+            idle-hint := Text {
+                text: "Open Spotify and pick";
+                font-size: 48px * root.s;
+                color: Theme.dim;
+                horizontal-alignment: center;
+            }
+            idle-device := Text {
+                text: root.device-name != "" ? root.device-name : "this device";
+                font-size: 96px * root.s;
+                font-weight: 700;
+                color: Theme.accent;
+                horizontal-alignment: center;
+                overflow: elide;
+                wrap: no-wrap;
+            }
+            if root.not-paired: idle-not-paired := Text {
+                text: "Not paired: hold OK and turn pairing on";
+                font-size: 36px * root.s;
+                color: Theme.faint;
+                horizontal-alignment: center;
+            }
         }
-        idle-device := Text {
-            text: root.device-name != "" ? root.device-name : "this device";
-            font-size: 96px * root.s;
-            font-weight: 700;
-            color: Theme.accent;
-            horizontal-alignment: center;
-            overflow: elide;
-            wrap: no-wrap;
+
+        // How to reach the settings: a d-pad with its centre button lit, and the words.
+        idle-settings-box := HorizontalLayout {
+            y: parent.height - self.height - 56px * root.s;
+            height: 48px * root.s;
+            alignment: center;
+            spacing: 16px * root.s;
+            Rectangle {
+                width: 48px * root.s;
+                Icon {
+                    width: parent.width;
+                    height: parent.height;
+                    commands: Icons.dpad;
+                    fill: Theme.dim;
+                }
+                Icon {
+                    width: parent.width;
+                    height: parent.height;
+                    commands: Icons.dpad-centre;
+                    fill: Theme.accent;
+                }
+            }
+            idle-settings-hint := Text {
+                text: "Hold OK for settings";
+                font-size: 30px * root.s;
+                color: Theme.dim;
+                vertical-alignment: center;
+                wrap: no-wrap;
+            }
         }
     }
 
@@ -315,6 +505,112 @@ export component App inherits Window {
                 vertical-alignment: center;
                 overflow: elide;
                 wrap: no-wrap;
+            }
+        }
+    }
+
+    // The settings panel: the right part of the window, over whatever screen is showing.
+    if root.settings-open: settings-panel := Rectangle {
+        x: parent.width * 0.62;
+        width: parent.width * 0.38;
+        height: parent.height;
+        background: #0b0f16f2;
+
+        Rectangle {
+            x: 0;
+            width: 2px * root.s;
+            background: Theme.track;
+        }
+
+        VerticalLayout {
+            padding: 40px * root.s;
+            spacing: 12px * root.s;
+
+            settings-title := Text {
+                text: root.settings-view == 1 ? "Calibrate delay" : (root.settings-view == 2 ? "Presets" : "Settings");
+                font-size: 44px * root.s;
+                font-weight: 700;
+                color: Theme.text;
+            }
+            Rectangle {
+                height: 12px * root.s;
+            }
+
+            if root.settings-view == 0: settings-list := VerticalLayout {
+                spacing: 6px * root.s;
+                for row in root.settings-rows: PanelRow {
+                    s: root.s;
+                    label: row.label;
+                    value: row.value;
+                    focused: row.focused;
+                }
+                Rectangle {
+                    height: 16px * root.s;
+                }
+                settings-status-text := Text {
+                    text: root.settings-status;
+                    font-size: 26px * root.s;
+                    color: Theme.faint;
+                    wrap: word-wrap;
+                }
+            }
+
+            if root.settings-view == 1: calibrate-view := VerticalLayout {
+                spacing: 28px * root.s;
+                calib-flash-box := Rectangle {
+                    height: 220px * root.s;
+                    border-radius: 24px * root.s;
+                    background: root.calib-flash ? Theme.text : #ffffff1f;
+                }
+                if root.calib-waiting: calib-waiting-text := Text {
+                    text: "Waiting for music…";
+                    font-size: 32px * root.s;
+                    color: Theme.dim;
+                    horizontal-alignment: center;
+                }
+                calib-delay-text := Text {
+                    text: root.calib-delay;
+                    font-size: 72px * root.s;
+                    font-weight: 700;
+                    color: Theme.accent;
+                    horizontal-alignment: center;
+                }
+                Text {
+                    text: "Left / Right change the delay until the flash matches the beat you hear. Back when done.";
+                    font-size: 26px * root.s;
+                    color: Theme.faint;
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                }
+            }
+
+            if root.settings-view == 2: presets-view := VerticalLayout {
+                spacing: 2px * root.s;
+                for entry in root.tree-rows: TreeRowView {
+                    s: root.s;
+                    item: entry;
+                }
+                Rectangle {
+                    height: 16px * root.s;
+                }
+                tree-summary-text := Text {
+                    text: root.tree-summary;
+                    font-size: 28px * root.s;
+                    color: Theme.dim;
+                    wrap: word-wrap;
+                }
+                if root.tree-note != "": tree-note-text := Text {
+                    text: root.tree-note;
+                    font-size: 26px * root.s;
+                    color: Theme.faint;
+                    wrap: word-wrap;
+                }
+                Text {
+                    text: "OK switches on or off. Right: open a folder, or try a preset. Back when done.";
+                    font-size: 24px * root.s;
+                    color: Theme.faint;
+                    wrap: word-wrap;
+                }
             }
         }
     }

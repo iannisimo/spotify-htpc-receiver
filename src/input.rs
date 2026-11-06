@@ -59,6 +59,11 @@ impl OkHold {
         Some(OkGesture::Hold)
     }
 
+    /// True while OK is down and the hold has not fired yet.
+    pub fn pending(&self) -> bool {
+        self.pressed_at.is_some() && !self.fired
+    }
+
     /// Forgets the press (the window lost focus; no release will come).
     pub fn reset(&mut self) {
         *self = OkHold::default();
@@ -246,6 +251,17 @@ mod tests {
         assert_eq!(ok.poll(t + ms(600)), Some(OkGesture::Hold));
         assert_eq!(ok.poll(t + ms(700)), None);
         assert_eq!(ok.release(t + ms(800)), None, "a hold is not also a tap");
+    }
+
+    #[test]
+    fn pending_until_the_hold_fires() {
+        let t = Instant::now();
+        let mut ok = OkHold::default();
+        assert!(!ok.pending());
+        ok.press(t, false);
+        assert!(ok.pending());
+        ok.poll(t + ms(600));
+        assert!(!ok.pending(), "fired: nothing left to wait for");
     }
 
     #[test]
