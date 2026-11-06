@@ -1798,6 +1798,7 @@ dependencies = [
  "futures-util",
  "i-slint-backend-testing",
  "image",
+ "libloading",
  "log",
  "pipewire",
  "reqwest",
