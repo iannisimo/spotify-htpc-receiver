@@ -14,8 +14,6 @@ pub enum Setting {
     Shuffle(bool),
     DelayMs(u32),
     Pairing(PairingMode),
-    /// `None` removes the key (back to the default name).
-    DeviceName(Option<String>),
 }
 
 #[derive(Debug)]
@@ -54,17 +52,12 @@ pub fn save_setting(path: &Path, setting: Setting) -> Result<(), SaveError> {
         .parse()
         .map_err(|e: toml_edit::TomlError| SaveError::Invalid(e.to_string()))?;
 
-    let (section, key, new) = match setting {
-        Setting::BeatSensitivity(v) => (
-            "visualizer",
-            "beat_sensitivity",
-            Some(one_decimal(v.into())),
-        ),
-        Setting::PresetDurationS(v) => ("visualizer", "preset_duration_s", Some(one_decimal(v))),
-        Setting::Shuffle(on) => ("visualizer", "shuffle", Some(Value::from(on))),
-        Setting::DelayMs(ms) => ("visualizer", "delay_ms", Some(Value::from(i64::from(ms)))),
-        Setting::Pairing(mode) => ("daemon", "pairing", Some(Value::from(mode.as_str()))),
-        Setting::DeviceName(name) => ("daemon", "device_name", name.map(Value::from)),
+    let (section, key, mut new) = match setting {
+        Setting::BeatSensitivity(v) => ("visualizer", "beat_sensitivity", one_decimal(v.into())),
+        Setting::PresetDurationS(v) => ("visualizer", "preset_duration_s", one_decimal(v)),
+        Setting::Shuffle(on) => ("visualizer", "shuffle", Value::from(on)),
+        Setting::DelayMs(ms) => ("visualizer", "delay_ms", Value::from(i64::from(ms))),
+        Setting::Pairing(mode) => ("daemon", "pairing", Value::from(mode.as_str())),
     };
 
     let table = doc
@@ -74,20 +67,12 @@ pub fn save_setting(path: &Path, setting: Setting) -> Result<(), SaveError> {
         .ok_or_else(|| SaveError::Invalid(format!("`{section}` is not a table")))?;
     // A table that only exists because of `[section.sub]` is written out once it gains a key.
     table.set_implicit(false);
-    match new {
-        Some(mut new) => {
-            // Replace the value in place, so the comments around the key and after the old
-            // value stay.
-            if let Some(Item::Value(old)) = table.get_mut(key) {
-                *new.decor_mut() = old.decor().clone();
-                *old = new;
-            } else {
-                table.insert(key, value(new));
-            }
-        }
-        None => {
-            table.remove(key);
-        }
+    // Replace the value in place, so the comments around the key and after the old value stay.
+    if let Some(Item::Value(old)) = table.get_mut(key) {
+        *new.decor_mut() = old.decor().clone();
+        *old = new;
+    } else {
+        table.insert(key, value(new));
     }
 
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
@@ -190,17 +175,19 @@ mod tests {
     }
 
     #[test]
-    fn save_device_name_and_reset() {
-        let dir = temp_dir("name");
+    fn save_pairing_keeps_other_daemon_keys() {
+        let dir = temp_dir("daemon-keys");
         let path = dir.join("config.toml");
-        std::fs::write(&path, "[daemon]\naddress = \"127.0.0.1:9191\"\n").unwrap();
-        save_setting(&path, Setting::DeviceName(Some("Den".to_owned()))).unwrap();
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("device_name = \"Den\""), "{text}");
-        save_setting(&path, Setting::DeviceName(None)).unwrap();
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert!(!text.contains("device_name"), "{text}");
-        assert!(text.contains("address = \"127.0.0.1:9191\""), "{text}");
+        std::fs::write(
+            &path,
+            "[daemon]\naddress = \"127.0.0.1:9191\"\ndevice_name = \"Den\"\n",
+        )
+        .unwrap();
+        save_setting(&path, Setting::Pairing(PairingMode::On)).unwrap();
+        let cfg = load(&path);
+        assert_eq!(cfg.daemon.pairing, PairingMode::On);
+        assert_eq!(cfg.daemon.address, "127.0.0.1:9191");
+        assert_eq!(cfg.daemon.device_name.as_deref(), Some("Den"));
     }
 
     #[test]

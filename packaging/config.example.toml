@@ -23,7 +23,8 @@
 # pairing = "off"
 
 # The name Spotify lists for this device (1-32 letters, digits, space and - _ . '). The
-# default is soloist-<hostname>. Changing it restarts Soloist.
+# default is soloist-<hostname>. Edit it here (the settings panel has no field for it) and
+# restart Soloist: systemctl --user restart soloist.service
 # device_name = "soloist-myhost"
 
 # The Soloist program that `htpc-nowplaying soloist` starts.
