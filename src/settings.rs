@@ -469,7 +469,11 @@ mod tests {
     fn right_demos_presets_and_expands_folders() {
         let mut p = presets_panel();
         assert_eq!(p.key(Key::Right), [], "on a folder it expands");
-        assert_eq!(p.tree().unwrap().visible_rows(10).len(), 5);
+        assert_eq!(
+            p.tree().unwrap().visible_rows(10).len(),
+            6,
+            "/, A, sub, a1, B, top"
+        );
         p.key(Key::Down); // sub
         p.key(Key::Down); // a1
         assert_eq!(
@@ -484,7 +488,10 @@ mod tests {
         assert!(matches!(p.key(Key::Right).as_slice(), [Effect::Demo(_)]));
         // Left collapses, then walks up.
         assert_eq!(p.key(Key::Left), []);
-        assert!(p.tree().unwrap().visible_rows(10)[0].focused);
+        assert!(
+            p.tree().unwrap().visible_rows(10)[1].focused,
+            "on A, below the root"
+        );
     }
 
     #[test]

@@ -1828,11 +1828,11 @@ mod tests {
                 .map(|r| r.label.to_string())
                 .collect()
         };
-        assert_eq!(labels(&h), ["A (2)", "top"]);
+        assert_eq!(labels(&h), ["/ (3)", "A (2)", "top"]);
         assert_eq!(h.app.get_tree_summary(), "3 presets");
 
         h.press(Key::RightArrow); // expand A
-        assert_eq!(labels(&h), ["A (2)", "a1", "b1", "top"]);
+        assert_eq!(labels(&h), ["/ (3)", "A (2)", "a1", "b1", "top"]);
         h.press(Key::DownArrow);
         h.press(Key::Return); // switch a1 off
         assert_eq!(
@@ -1840,7 +1840,7 @@ mod tests {
             "A/a1.milk\n"
         );
         assert_eq!(h.app.get_tree_summary(), "3 presets, 1 off");
-        assert_eq!(labels(&h)[0], "A (2, 1 off)");
+        assert_eq!(labels(&h)[..2], ["/ (3, 1 off)", "A (2, 1 off)"]);
         assert!(
             h.controller
                 .borrow()
@@ -1849,6 +1849,22 @@ mod tests {
                 .disabled()
                 .contains("A/a1.milk"),
             "the visualizer is told"
+        );
+
+        // `/` switches everything: Up past A to the root.
+        h.press(Key::UpArrow);
+        h.press(Key::UpArrow);
+        h.press(Key::Return);
+        assert_eq!(h.app.get_tree_summary(), "3 presets, 3 off");
+        assert_eq!(
+            std::fs::read_to_string(h.dir.join("disabled-presets.txt")).unwrap(),
+            "A/\ntop.milk\n"
+        );
+        h.press(Key::Return);
+        assert_eq!(h.app.get_tree_summary(), "3 presets");
+        assert_eq!(
+            std::fs::read_to_string(h.dir.join("disabled-presets.txt")).unwrap(),
+            ""
         );
 
         h.press(Key::Escape);

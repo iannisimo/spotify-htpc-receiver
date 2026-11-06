@@ -59,10 +59,10 @@ struct Node {
 
 #[derive(Debug)]
 pub struct PresetTree {
-    /// Node 0 is the (never shown) root.
+    /// Node 0 is the root, shown as the first row, `/`: toggling it switches every preset.
     nodes: Vec<Node>,
     by_path: HashMap<PathBuf, usize>,
-    /// The node under the cursor (never the root unless the tree is empty).
+    /// The node under the cursor.
     cursor: usize,
     demo: Option<usize>,
 }
@@ -75,8 +75,10 @@ struct Dir {
 }
 
 impl PresetTree {
-    /// `presets` are absolute paths below `root`. Folders come before presets, both sorted by
-    /// name; every folder starts collapsed and the cursor on the first row.
+    /// `presets` are absolute paths below `root`. The first row is the root (`/`, expanded),
+    /// then folders before presets, both sorted by name; every other folder starts collapsed.
+    /// The cursor starts on the row below the root, so an OK right after opening cannot switch
+    /// off everything.
     pub fn build(root: &Path, presets: &[PathBuf], disabled: &DisabledPresets) -> PresetTree {
         let mut top = Dir::default();
         for path in presets {
@@ -116,7 +118,7 @@ impl PresetTree {
         };
         tree.add_dir(0, &top, disabled);
         tree.recount();
-        tree.cursor = tree.visible().first().copied().unwrap_or(0);
+        tree.cursor = tree.nodes[0].children.first().copied().unwrap_or(0);
         tree
     }
 
@@ -198,7 +200,7 @@ impl PresetTree {
     fn visible(&self) -> Vec<usize> {
         let mut shown = vec![false; self.nodes.len()];
         shown[0] = true;
-        let mut rows = Vec::new();
+        let mut rows = vec![0];
         for id in 1..self.nodes.len() {
             let parent = self.nodes[id].parent;
             let parent_open =
@@ -221,38 +223,29 @@ impl PresetTree {
     }
 
     pub fn expand(&mut self) {
-        if let Kind::Folder { expanded, .. } = &mut self.nodes[self.cursor].kind
-            && self.cursor != 0
-        {
+        if let Kind::Folder { expanded, .. } = &mut self.nodes[self.cursor].kind {
             *expanded = true;
         }
     }
 
     /// Collapses the folder under the cursor; on a preset or an already collapsed folder, moves
-    /// to the parent folder instead.
+    /// to the parent folder instead (the root has none).
     pub fn collapse(&mut self) {
-        if self.cursor == 0 {
-            return;
-        }
         if let Kind::Folder { expanded, .. } = &mut self.nodes[self.cursor].kind
             && *expanded
         {
             *expanded = false;
             return;
         }
-        let parent = self.nodes[self.cursor].parent;
-        if parent != 0 {
-            self.cursor = parent;
+        if self.cursor != 0 {
+            self.cursor = self.nodes[self.cursor].parent;
         }
     }
 
     /// A preset: flips it. A folder that is `Mixed` or `On` goes all off; one that is `Off`
-    /// goes all on.
+    /// goes all on. On the root this switches every preset.
     pub fn toggle(&mut self) {
         let id = self.cursor;
-        if id == 0 {
-            return;
-        }
         let enable = match self.nodes[id].kind {
             Kind::Preset { enabled, .. } => !enabled,
             Kind::Folder { total, off, .. } => off == total,
@@ -315,10 +308,11 @@ impl PresetTree {
                 total,
                 off,
             } => {
+                let name = if id == 0 { "/" } else { node.name.as_str() };
                 let label = if *off == 0 {
-                    format!("{} ({total})", node.name)
+                    format!("{name} ({total})")
                 } else {
-                    format!("{} ({total}, {off} off)", node.name)
+                    format!("{name} ({total}, {off} off)")
                 };
                 let check = match *off {
                     0 => Check::On,
@@ -337,7 +331,8 @@ impl PresetTree {
             }
         };
         TreeRow {
-            depth: node.depth,
+            // Everything sits one level below the root row.
+            depth: if id == 0 { 0 } else { node.depth + 1 },
             label,
             check,
             folder,
@@ -433,33 +428,79 @@ mod tests {
     }
 
     #[test]
-    fn builds_collapsed_folders_first() {
+    fn builds_collapsed_folders_first_below_the_root() {
         let tree = sample(&DisabledPresets::default());
-        assert_eq!(labels(&tree), ["A (2)", "B (1)", "top"]);
+        assert_eq!(labels(&tree), ["/ (4)", "A (2)", "B (1)", "top"]);
         assert_eq!(tree.counts(), (4, 0));
         let rows = tree.visible_rows(10);
-        assert!(rows[0].focused && !rows[1].focused);
-        assert_eq!(rows[0].folder.map(|f| f.expanded), Some(false));
-        assert_eq!(rows[2].folder, None);
+        assert!(
+            !rows[0].focused && rows[1].focused,
+            "cursor starts below the root"
+        );
+        assert_eq!(rows[0].folder.map(|f| f.expanded), Some(true));
+        assert_eq!(rows[1].folder.map(|f| f.expanded), Some(false));
+        assert_eq!(rows[3].folder, None);
     }
 
     #[test]
     fn expand_collapse_and_parent() {
         let mut tree = sample(&DisabledPresets::default());
         tree.expand();
-        assert_eq!(labels(&tree), ["A (2)", "sub (1)", "a1", "B (1)", "top"]);
+        assert_eq!(
+            labels(&tree),
+            ["/ (4)", "A (2)", "sub (1)", "a1", "B (1)", "top"]
+        );
         tree.move_cursor(2);
         assert_eq!(tree.cursor_preset(), Some(PathBuf::from("/p/A/a1.milk")));
         tree.collapse();
         assert_eq!(tree.cursor_preset(), None);
-        assert!(tree.visible_rows(10)[0].focused, "cursor moved to A");
+        assert!(tree.visible_rows(10)[1].focused, "cursor moved to A");
         tree.collapse();
-        assert_eq!(labels(&tree), ["A (2)", "B (1)", "top"]);
+        assert_eq!(labels(&tree), ["/ (4)", "A (2)", "B (1)", "top"]);
         let depths: Vec<u32> = {
             tree.expand();
             tree.visible_rows(10).iter().map(|r| r.depth).collect()
         };
-        assert_eq!(depths, [0, 1, 1, 0, 0]);
+        assert_eq!(depths, [0, 1, 2, 2, 1, 1]);
+    }
+
+    #[test]
+    fn the_root_collapses_and_is_the_last_parent() {
+        let mut tree = sample(&DisabledPresets::default());
+        tree.collapse(); // A is collapsed already: go to its parent, the root
+        assert!(tree.visible_rows(10)[0].focused);
+        tree.collapse();
+        assert_eq!(labels(&tree), ["/ (4)"]);
+        tree.collapse();
+        assert_eq!(labels(&tree), ["/ (4)"], "nothing above the root");
+        tree.expand();
+        assert_eq!(labels(&tree), ["/ (4)", "A (2)", "B (1)", "top"]);
+    }
+
+    #[test]
+    fn toggling_the_root_switches_every_preset() {
+        let mut tree = sample(&DisabledPresets::default());
+        tree.move_cursor(-1);
+        tree.toggle();
+        assert_eq!(tree.counts(), (4, 4));
+        let rows = tree.visible_rows(10);
+        assert_eq!(rows[0].label, "/ (4, 4 off)");
+        assert!(rows.iter().all(|r| r.check == Check::Off));
+        let saved = tree.to_disabled(&DisabledPresets::default());
+        assert_eq!(
+            saved.entries().collect::<Vec<_>>(),
+            ["A/", "B/", "top.milk"]
+        );
+
+        tree.toggle();
+        assert_eq!(tree.counts(), (4, 0));
+        // Mixed goes all off, like any folder.
+        tree.move_cursor(3); // top
+        tree.toggle();
+        tree.move_cursor(-3);
+        assert_eq!(tree.visible_rows(10)[0].check, Check::Mixed);
+        tree.toggle();
+        assert_eq!(tree.counts(), (4, 4));
     }
 
     #[test]
@@ -469,15 +510,16 @@ mod tests {
         tree.move_cursor(1); // sub
         tree.toggle();
         let rows = tree.visible_rows(10);
-        assert_eq!(rows[0].check, Check::Mixed, "A has one off, one on");
-        assert_eq!(rows[1].check, Check::Off);
-        assert_eq!(rows[1].label, "sub (1, 1 off)");
+        assert_eq!(rows[1].check, Check::Mixed, "A has one off, one on");
+        assert_eq!(rows[2].check, Check::Off);
+        assert_eq!(rows[2].label, "sub (1, 1 off)");
+        assert_eq!(rows[0].check, Check::Mixed, "so does the root");
         tree.move_cursor(-1);
         tree.toggle();
-        assert!(tree.visible_rows(10)[0].check == Check::Off);
+        assert!(tree.visible_rows(10)[1].check == Check::Off);
         assert_eq!(tree.counts(), (4, 2));
         tree.toggle();
-        assert!(tree.visible_rows(10)[0].check == Check::On);
+        assert!(tree.visible_rows(10)[1].check == Check::On);
         assert_eq!(tree.counts(), (4, 0));
     }
 
@@ -620,7 +662,7 @@ mod tests {
         tree.collapse();
         tree.toggle();
         assert_eq!(tree.cursor_preset(), None);
-        assert!(tree.visible_rows(5).is_empty());
+        assert_eq!(labels(&tree), ["/ (0)"]);
         assert_eq!(tree.counts(), (0, 0));
     }
 }
