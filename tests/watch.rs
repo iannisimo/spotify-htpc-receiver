@@ -102,6 +102,33 @@ async fn launches_ui_once_when_cast_starts() {
 }
 
 #[tokio::test]
+async fn playback_on_the_phone_does_not_launch() {
+    // Recorded live with playback on the phone: Soloist relays play, pause and skips while
+    // reporting itself inactive.
+    let launcher = FakeLauncher::default();
+    let (_fake, mut ws, task) = idle_watcher(&launcher).await;
+    for name in [
+        "playback_changed_playing.json",
+        "remote_playback_state_playing.json",
+        "position_sync.json",
+        "playback_changed_paused.json",
+        "remote_track_changed.json",
+        "playback_changed_playing.json",
+        "remote_playback_state_playing.json",
+    ] {
+        send_text(&mut ws, &fixture(name)).await;
+    }
+    tokio::time::sleep(SETTLE).await;
+    assert_eq!(launcher.state().launches, 0);
+    assert_eq!(launcher.state().checks, 0, "not even considered a cast");
+
+    // Picking HTPC afterwards still launches.
+    cast(&mut ws).await;
+    until("a launch", || launcher.state().launches == 1).await;
+    task.abort();
+}
+
+#[tokio::test]
 async fn does_not_launch_when_ui_already_running() {
     let launcher = FakeLauncher::default();
     launcher.state().running = true;

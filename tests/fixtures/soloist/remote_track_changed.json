@@ -1,0 +1,71 @@
+{
+  "type": "track_changed",
+  "item": {
+    "uri": "spotify:track:0CAfXk7DXMnon4gLudAp7J",
+    "entity_type": "track",
+    "decorations": {
+      "identity": {
+        "name": "Low (feat. T-Pain)"
+      },
+      "visual_identity": {
+        "cover": [
+          {
+            "url": "https://i.scdn.co/image/ab67616d000048519c90c39df78a8c99275c81a2",
+            "size": "small"
+          },
+          {
+            "url": "https://i.scdn.co/image/ab67616d00001e029c90c39df78a8c99275c81a2",
+            "size": "default"
+          },
+          {
+            "url": "https://i.scdn.co/image/ab67616d0000b2739c90c39df78a8c99275c81a2",
+            "size": "large"
+          },
+          {
+            "url": "https://i.scdn.co/image/ab67616d0000b2739c90c39df78a8c99275c81a2",
+            "size": "xlarge"
+          }
+        ]
+      },
+      "parent": {
+        "entity": {
+          "uri": "spotify:album:5j1wrOAOm5KFd17pPiSvle",
+          "entity_type": "album",
+          "decorations": {
+            "identity": {
+              "name": "Mail on Sunday"
+            }
+          }
+        }
+      },
+      "creators": [
+        {
+          "entity": {
+            "uri": "spotify:artist:0jnsk9HBra6NMjO2oANoPY",
+            "entity_type": "artist",
+            "decorations": {
+              "identity": {
+                "name": "Flo Rida"
+              }
+            }
+          }
+        },
+        {
+          "entity": {
+            "uri": "spotify:artist:3aQeKQSyrW4qWr35idm0cy",
+            "entity_type": "artist",
+            "decorations": {
+              "identity": {
+                "name": "T-Pain"
+              }
+            }
+          }
+        }
+      ],
+      "playback": {
+        "duration_ms": 231400,
+        "content_ratings": []
+      }
+    }
+  }
+}

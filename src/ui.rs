@@ -239,6 +239,11 @@ impl Controller {
         let now = Instant::now();
         // The screen switch itself already happened in `handle_key`.
         match handle_key(&mut self.ui, key, &self.cfg) {
+            // The idle screen has no controls. A command sent while another device plays
+            // could reach that device's playback through Soloist.
+            Action::Send(cmd) if self.player.track.is_none() => {
+                log::debug!("ignoring {cmd:?}: nothing is playing here");
+            }
             Action::Send(cmd) => (self.send)(cmd),
             Action::OpenVisualizer => {
                 let delay_ms = self.cfg.visualizer.delay_ms;
@@ -735,6 +740,27 @@ mod tests {
             *h.sent.borrow(),
             [Command::VolumeDelta(5), Command::VolumeDelta(-5)]
         );
+    }
+
+    #[test]
+    fn idle_screen_sends_no_commands() {
+        let h = Harness::new(Config {
+            audio_controls: true,
+            ..Config::default()
+        });
+        h.apply([
+            PlayerEvent::Connected,
+            PlayerEvent::DeviceActive(false),
+            // Relayed from the phone while this device is inactive.
+            PlayerEvent::TrackChanged(Some(track("Phone song"))),
+            PlayerEvent::PlaybackChanged(Playback::Playing),
+        ]);
+        assert!(h.exists("App::idle-view"), "the phone's track is not shown");
+        assert!(h.covers_requested.borrow().is_empty());
+        for key in [Key::Return, Key::UpArrow, Key::LeftArrow, Key::Return] {
+            h.press(key);
+        }
+        assert!(h.sent.borrow().is_empty(), "sent {:?}", h.sent.borrow());
     }
 
     #[test]

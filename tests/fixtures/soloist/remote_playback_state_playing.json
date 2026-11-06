@@ -1,0 +1,100 @@
+{
+  "type": "playback_state",
+  "status": "playing",
+  "item": {
+    "uri": "spotify:track:1HHeOs6zRdF8Ck58easiAY",
+    "entity_type": "track",
+    "decorations": {
+      "identity": {
+        "name": "Alejandro"
+      },
+      "visual_identity": {
+        "cover": [
+          {
+            "url": "https://i.scdn.co/image/ab67616d000048515c9890c0456a3719eeecd8aa",
+            "size": "small"
+          },
+          {
+            "url": "https://i.scdn.co/image/ab67616d00001e025c9890c0456a3719eeecd8aa",
+            "size": "default"
+          },
+          {
+            "url": "https://i.scdn.co/image/ab67616d0000b2735c9890c0456a3719eeecd8aa",
+            "size": "large"
+          },
+          {
+            "url": "https://i.scdn.co/image/ab67616d0000b2735c9890c0456a3719eeecd8aa",
+            "size": "xlarge"
+          }
+        ]
+      },
+      "parent": {
+        "entity": {
+          "uri": "spotify:album:6rePArBMb5nLWEaY9aQqL4",
+          "entity_type": "album",
+          "decorations": {
+            "identity": {
+              "name": "The Fame Monster (Deluxe Edition)"
+            }
+          }
+        }
+      },
+      "creators": [
+        {
+          "entity": {
+            "uri": "spotify:artist:1HY2Jd0NmPuamShAr6KMms",
+            "entity_type": "artist",
+            "decorations": {
+              "identity": {
+                "name": "Lady Gaga"
+              }
+            }
+          }
+        }
+      ],
+      "playback": {
+        "duration_ms": 274213,
+        "content_ratings": []
+      }
+    }
+  },
+  "context": {
+    "uri": "spotify:playlist:37i9dQZF1EQn4jwNIohw50",
+    "entity_type": "playlist",
+    "decorations": {
+      "identity": {
+        "name": "2000s Mix"
+      }
+    }
+  },
+  "position": {
+    "position_ms": 23130,
+    "timestamp_ms": 1793951329603,
+    "speed": 1
+  },
+  "volume": 100,
+  "is_active": false,
+  "options": {
+    "shuffle": false,
+    "repeat": "off",
+    "playback_speed": 0,
+    "modes": {
+      "context_enhancement": "NONE"
+    }
+  },
+  "available_actions": {
+    "add_to_queue": {},
+    "pause": {},
+    "seek": {},
+    "seek_backward": {
+      "step_ms": 15000
+    },
+    "seek_forward": {
+      "step_ms": 15000
+    },
+    "set_repeat": {},
+    "shuffle": {},
+    "skip_next": {},
+    "skip_prev": {}
+  }
+}

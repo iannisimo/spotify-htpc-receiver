@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 
 use crate::config::Config;
 use crate::instance;
-use crate::model::{Playback, PlayerEvent};
+use crate::model::PlayerEvent;
 use crate::player;
 
 /// Starts the UI and tells whether one is running.
@@ -17,9 +17,9 @@ pub trait Launcher {
     fn ui_running(&self) -> bool;
 }
 
-/// Spots the start of a cast session. A session starts when the device becomes active (or,
-/// should that event be missed, when playback starts while it was not) and ends when the
-/// device goes inactive. Each session is reported once.
+/// Spots the start of a cast session: it starts when the device becomes active and ends when
+/// it goes inactive. Each session is reported once. Playback events alone never start one:
+/// while inactive, Soloist relays the playback of the active device (the phone) too.
 #[derive(Debug, Default)]
 pub struct CastDetector {
     active: bool,
@@ -28,11 +28,9 @@ pub struct CastDetector {
 impl CastDetector {
     /// True when `ev` starts a new cast session.
     pub fn on_event(&mut self, ev: &PlayerEvent) -> bool {
-        let active = match ev {
-            PlayerEvent::DeviceActive(active) => *active,
-            PlayerEvent::PlaybackChanged(Playback::Playing) => true,
-            // Connection changes say nothing about the cast; the reconnect's state decides.
-            _ => return false,
+        // Connection changes say nothing about the cast; the reconnect's state decides.
+        let PlayerEvent::DeviceActive(active) = *ev else {
+            return false;
         };
         let started = active && !self.active;
         self.active = active;
@@ -107,7 +105,7 @@ impl Launcher for ProcessLauncher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::Track;
+    use crate::model::{Playback, Track};
 
     fn track() -> Track {
         Track {
@@ -161,28 +159,27 @@ mod tests {
     }
 
     #[test]
-    fn playing_while_inactive_starts_a_session() {
-        let mut d = CastDetector::default();
-        assert!(d.on_event(&PlayerEvent::PlaybackChanged(Playback::Playing)));
-        assert!(
-            !d.on_event(&PlayerEvent::DeviceActive(true)),
-            "same session"
-        );
-    }
-
-    #[test]
-    fn paused_or_track_while_inactive_does_not() {
+    fn playback_on_another_device_does_not_start_a_session() {
+        // Seen live: with playback on the phone, Soloist relays its playing/paused/track
+        // events while reporting is_active false.
         let mut d = CastDetector::default();
         let seen = starts(
             &mut d,
             &[
+                PlayerEvent::DeviceActive(false),
+                PlayerEvent::PlaybackChanged(Playback::Playing),
+                PlayerEvent::TrackChanged(Some(track())),
+                PlayerEvent::DeviceActive(false),
                 PlayerEvent::PlaybackChanged(Playback::Paused),
                 PlayerEvent::PlaybackChanged(Playback::Buffering),
-                PlayerEvent::TrackChanged(Some(track())),
                 PlayerEvent::VolumeChanged(40),
             ],
         );
-        assert_eq!(seen, [false; 4]);
+        assert_eq!(seen, [false; 7]);
+        assert!(
+            d.on_event(&PlayerEvent::DeviceActive(true)),
+            "a real cast still counts"
+        );
     }
 
     #[test]

@@ -58,6 +58,9 @@ pub struct NowPlaying {
     pub connected: bool,
     /// Shown on the idle screen ("pick <device name> in Spotify"); `None` until the daemon says.
     pub device_name: Option<String>,
+    /// Whether this device is the one playing. While it is not, Soloist still relays what the
+    /// active device (the phone) plays; none of that belongs on this screen.
+    active: bool,
     anchor_ms: u64,
     anchor_at: Option<Instant>,
 }
@@ -80,10 +83,20 @@ impl NowPlaying {
                 self.connected = false;
             }
             PlayerEvent::DeviceName(name) => self.device_name = Some(name),
-            PlayerEvent::DeviceActive(true) => {}
-            PlayerEvent::DeviceActive(false) | PlayerEvent::TrackChanged(None) => {
-                self.clear_track()
+            PlayerEvent::DeviceActive(active) => {
+                self.active = active;
+                if !active {
+                    self.clear_track();
+                }
             }
+            PlayerEvent::VolumeChanged(volume) => self.volume = volume.min(100),
+            // Playback of another device, relayed while this one is inactive (seen live:
+            // track_changed and playback_changed carry no is_active flag).
+            PlayerEvent::TrackChanged(_)
+            | PlayerEvent::PlaybackChanged(_)
+            | PlayerEvent::Position { .. }
+                if !self.active => {}
+            PlayerEvent::TrackChanged(None) => self.clear_track(),
             PlayerEvent::TrackChanged(Some(track)) => {
                 // Soloist repeats the current item in every playback_state; only a new track
                 // restarts the clock.
@@ -117,8 +130,12 @@ impl NowPlaying {
                 let aged = position_ms.saturating_add((age_ms as f64 * speed).round() as u64);
                 self.set_anchor(aged, now);
             }
-            PlayerEvent::VolumeChanged(volume) => self.volume = volume.min(100),
         }
+    }
+
+    /// Whether this device is the one playing.
+    pub fn is_active(&self) -> bool {
+        self.active
     }
 
     /// Current playback position. Advances in real time only while playing and connected
@@ -421,6 +438,7 @@ mod tests {
     fn track_arriving_while_idle_starts_paused() {
         let t0 = Instant::now();
         let mut np = NowPlaying::default();
+        np.apply(PlayerEvent::DeviceActive(true), t0, UNIX_NOW);
         np.apply(
             PlayerEvent::TrackChanged(Some(track("A", 1_000))),
             t0,
@@ -428,6 +446,54 @@ mod tests {
         );
         assert_eq!(np.playback, Playback::Paused);
         assert_eq!(np.position_ms(t0 + ms(500)), 0);
+    }
+
+    #[test]
+    fn playback_of_another_device_is_ignored_while_inactive() {
+        // Seen live: with playback on the phone, Soloist relays track_changed and
+        // playback_changed (no is_active flag), then playback_state with is_active false.
+        let t0 = Instant::now();
+        let mut np = NowPlaying::default();
+        for ev in [
+            PlayerEvent::Connected,
+            PlayerEvent::DeviceActive(false),
+            PlayerEvent::TrackChanged(Some(track("Phone song", 200_000))),
+            PlayerEvent::PlaybackChanged(Playback::Playing),
+            PlayerEvent::Position {
+                position_ms: 5_000,
+                timestamp_ms: UNIX_NOW,
+                speed: 1.0,
+            },
+        ] {
+            np.apply(ev, t0, UNIX_NOW);
+            assert_eq!(np.track, None, "after {:?}", np.playback);
+            assert_eq!(np.playback, Playback::Idle);
+        }
+        assert!(!np.is_active());
+        np.apply(PlayerEvent::VolumeChanged(70), t0, UNIX_NOW);
+        assert_eq!(np.volume, 70, "this device's own volume still applies");
+    }
+
+    #[test]
+    fn becoming_inactive_mid_track_stops_following_playback() {
+        let t0 = Instant::now();
+        let mut np = playing_at(t0, 0);
+        assert!(np.is_active());
+        np.apply(PlayerEvent::DeviceActive(false), t0, UNIX_NOW);
+        np.apply(
+            PlayerEvent::TrackChanged(Some(track("B", 1_000))),
+            t0,
+            UNIX_NOW,
+        );
+        assert_eq!(np.track, None);
+        // Back to this device: its next playback_state brings the track.
+        np.apply(PlayerEvent::DeviceActive(true), t0, UNIX_NOW);
+        np.apply(
+            PlayerEvent::TrackChanged(Some(track("B", 1_000))),
+            t0,
+            UNIX_NOW,
+        );
+        assert_eq!(np.track.unwrap().title, "B");
     }
 
     #[test]
