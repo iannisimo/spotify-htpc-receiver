@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use common::{FakeSoloist, WAIT, Ws, fixture, send_text};
-use htpc_nowplaying::config::{Config, DaemonConfig};
+use htpc_nowplaying::config::{Config, DaemonConfig, PairingMode};
+use htpc_nowplaying::pairing::{HelperCommand, HelperStatus};
 use htpc_nowplaying::watch::{Launcher, watch};
 use tokio::task::JoinHandle;
 
@@ -52,6 +53,51 @@ impl Launcher for FakeLauncher {
     }
 }
 
+/// The pairing side of the watcher: what the config file says, whether the systemd unit runs
+/// Soloist, and a record of the helper's calls.
+#[derive(Clone)]
+struct FakePairing {
+    mode: PairingMode,
+    unit_active: bool,
+    calls: Arc<Mutex<Vec<HelperCommand>>>,
+}
+
+impl Default for FakePairing {
+    /// Pairing off, and the unit running Soloist: the watcher has nothing to do.
+    fn default() -> Self {
+        FakePairing {
+            mode: PairingMode::Off,
+            unit_active: true,
+            calls: Arc::default(),
+        }
+    }
+}
+
+impl FakePairing {
+    fn calls(&self) -> Vec<HelperCommand> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+fn spawn_watch(
+    daemon: DaemonConfig,
+    launcher: &FakeLauncher,
+    pairing: &FakePairing,
+) -> JoinHandle<()> {
+    let calls = pairing.calls.clone();
+    let (unit_active, mode) = (pairing.unit_active, pairing.mode);
+    tokio::spawn(watch(
+        cfg(daemon),
+        launcher.clone(),
+        move |cmd| {
+            calls.lock().unwrap().push(cmd);
+            HelperStatus::Closed
+        },
+        move || unit_active,
+        move || mode,
+    ))
+}
+
 /// Polls until `cond` holds, failing the test after [`WAIT`].
 async fn until(what: &str, cond: impl Fn() -> bool) {
     let deadline = Instant::now() + WAIT;
@@ -70,8 +116,15 @@ fn cfg(daemon: DaemonConfig) -> Config {
 
 /// A watcher connected to a fake Soloist that reports an idle device.
 async fn idle_watcher(launcher: &FakeLauncher) -> (FakeSoloist, Ws, JoinHandle<()>) {
+    idle_watcher_with(launcher, &FakePairing::default()).await
+}
+
+async fn idle_watcher_with(
+    launcher: &FakeLauncher,
+    pairing: &FakePairing,
+) -> (FakeSoloist, Ws, JoinHandle<()>) {
     let (fake, daemon) = FakeSoloist::start().await;
-    let task = tokio::spawn(watch(cfg(daemon), launcher.clone()));
+    let task = spawn_watch(daemon, launcher, pairing);
     let mut ws = fake.accept().await;
     send_text(&mut ws, INACTIVE_AUTH).await;
     (fake, ws, task)
@@ -198,16 +251,84 @@ async fn launch_failure_is_logged_and_watcher_keeps_running() {
 }
 
 #[tokio::test]
+async fn hand_run_soloist_opens_on_connect_and_closes_on_disconnect() {
+    let launcher = FakeLauncher::default();
+    let pairing = FakePairing {
+        mode: PairingMode::On,
+        unit_active: false,
+        ..FakePairing::default()
+    };
+    let (fake, ws, task) = idle_watcher_with(&launcher, &pairing).await;
+    until("the first open", || {
+        pairing.calls() == [HelperCommand::Open]
+    })
+    .await;
+
+    // Soloist stops and comes back (its port changes), as a hand-run one does.
+    drop(ws);
+    until("the close", || pairing.calls().len() == 2).await;
+    let mut ws = fake.accept().await;
+    send_text(&mut ws, INACTIVE_AUTH).await;
+    until("the second open", || pairing.calls().len() == 3).await;
+    assert_eq!(
+        pairing.calls(),
+        [
+            HelperCommand::Open,
+            HelperCommand::Close,
+            HelperCommand::Open
+        ]
+    );
+    task.abort();
+}
+
+#[tokio::test]
+async fn unit_managed_soloist_is_left_to_the_unit() {
+    let launcher = FakeLauncher::default();
+    let pairing = FakePairing {
+        mode: PairingMode::On,
+        unit_active: true,
+        ..FakePairing::default()
+    };
+    let (_fake, ws, task) = idle_watcher_with(&launcher, &pairing).await;
+    tokio::time::sleep(SETTLE).await;
+    drop(ws);
+    tokio::time::sleep(SETTLE).await;
+    assert_eq!(
+        pairing.calls(),
+        [],
+        "the unit opens and closes the port itself"
+    );
+    task.abort();
+}
+
+#[tokio::test]
+async fn pairing_off_does_not_call_helper() {
+    let launcher = FakeLauncher::default();
+    let pairing = FakePairing {
+        mode: PairingMode::Off,
+        unit_active: false,
+        ..FakePairing::default()
+    };
+    let (_fake, ws, task) = idle_watcher_with(&launcher, &pairing).await;
+    tokio::time::sleep(SETTLE).await;
+    drop(ws);
+    tokio::time::sleep(SETTLE).await;
+    assert_eq!(pairing.calls(), []);
+    task.abort();
+}
+
+#[tokio::test]
 async fn daemon_down_at_start_watcher_waits() {
     let launcher = FakeLauncher::default();
     let address = FakeSoloist::free_address();
-    let task = tokio::spawn(watch(
-        cfg(DaemonConfig {
+    let task = spawn_watch(
+        DaemonConfig {
             address: address.clone(),
             ..Config::default().daemon
-        }),
-        launcher.clone(),
-    ));
+        },
+        &launcher,
+        &FakePairing::default(),
+    );
     tokio::time::sleep(SETTLE).await;
     assert!(!task.is_finished(), "keeps waiting for Soloist");
 

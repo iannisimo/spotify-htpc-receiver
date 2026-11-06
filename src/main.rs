@@ -81,6 +81,12 @@ fn run_watch(cfg: config::Config) -> Result<(), Box<dyn std::error::Error>> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(watch::watch(cfg, launcher));
+    runtime.block_on(watch::watch(
+        cfg,
+        launcher,
+        pairing::run_helper,
+        soloist::service_active,
+        || config::load(&config::default_path()).daemon.pairing,
+    ));
     Ok(())
 }

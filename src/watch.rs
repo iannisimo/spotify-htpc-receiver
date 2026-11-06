@@ -3,12 +3,14 @@
 use std::io;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
-use crate::config::Config;
+use crate::config::{Config, PairingMode};
 use crate::instance;
 use crate::model::PlayerEvent;
+use crate::pairing::{HelperCommand, HelperStatus, Pairing};
 use crate::player;
 
 /// Starts the UI and tells whether one is running.
@@ -41,13 +43,66 @@ impl CastDetector {
 /// Watches Soloist forever (reconnecting as needed) and launches the UI at the start of each
 /// cast session, unless one is already running. A failed launch is logged; the next session
 /// tries again.
-pub async fn watch(cfg: Config, launcher: impl Launcher) {
+///
+/// It also keeps the pairing port open for a Soloist started by hand (the UI may be closed):
+/// on each connection change it asks `pairing_mode` (the config file's current setting) and
+/// `unit_active` (whether the systemd unit runs Soloist; the unit manages the port itself)
+/// and runs `helper` as needed. Both `helper` and `unit_active` block, so they run on
+/// blocking threads, one event at a time and in order.
+pub async fn watch(
+    cfg: Config,
+    launcher: impl Launcher,
+    helper: impl Fn(HelperCommand) -> HelperStatus + Send + Sync + 'static,
+    unit_active: impl Fn() -> bool + Send + Sync + 'static,
+    pairing_mode: impl Fn() -> PairingMode + Send + Sync + 'static,
+) {
     let (events_tx, mut events) = mpsc::channel(64);
     let _client = player::spawn(cfg.daemon, events_tx);
+    let (pairing_tx, pairing_rx) = mpsc::unbounded_channel();
+    tokio::spawn(keep_pairing_port(
+        pairing_rx,
+        Arc::new(helper),
+        Arc::new(unit_active),
+        Arc::new(pairing_mode),
+    ));
     let mut detector = CastDetector::default();
     while let Some(ev) = events.recv().await {
+        if matches!(ev, PlayerEvent::Connected | PlayerEvent::Disconnected) {
+            // The worker lives as long as this loop does.
+            let _ = pairing_tx.send(ev.clone());
+        }
         if detector.on_event(&ev) {
             start_ui(&launcher);
+        }
+    }
+}
+
+type Helper = Arc<dyn Fn(HelperCommand) -> HelperStatus + Send + Sync>;
+
+/// Handles connection changes one after the other, so an Open is never overtaken by the Close
+/// before it.
+async fn keep_pairing_port(
+    mut events: mpsc::UnboundedReceiver<PlayerEvent>,
+    helper: Helper,
+    unit_active: Arc<dyn Fn() -> bool + Send + Sync>,
+    pairing_mode: Arc<dyn Fn() -> PairingMode + Send + Sync>,
+) {
+    while let Some(ev) = events.recv().await {
+        let (helper, unit_active, pairing_mode) =
+            (helper.clone(), unit_active.clone(), pairing_mode.clone());
+        let step = tokio::task::spawn_blocking(move || {
+            // Re-read on every change: the settings panel may have toggled it since.
+            let mode = pairing_mode();
+            if mode == PairingMode::Off {
+                return None;
+            }
+            let command = Pairing::new(mode).on_event(&ev, unit_active())?;
+            Some((command, helper(command)))
+        });
+        match step.await {
+            Ok(Some((command, status))) => log::info!("pairing: {command:?}: {status:?}"),
+            Ok(None) => {}
+            Err(e) => log::warn!("pairing helper task failed: {e}"),
         }
     }
 }
