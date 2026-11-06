@@ -220,9 +220,10 @@ A broken `config.toml` is never overwritten: the panel says "Not saved" and the 
 until the app closes.
 
 The remote's keys must arrive as ordinary key presses. The defaults are the arrow keys,
-Return for OK and Escape or BackSpace for Back. Media keys and a dedicated Back key
-(`XF86Back`) never reach the app, so a remote's Back button must send Escape or BackSpace.
-Remap other keys in the config's `[keys]` section; `wev` shows the names your remote sends.
+Return for OK, and Escape, BackSpace or a remote's dedicated Back key (`XF86Back`) for Back.
+`XF86Forward` and `XF86HomePage` can be bound too. Media keys (`XF86AudioPlay` and the like)
+never reach the app. Remap other keys in the config's `[keys]` section; `wev` shows the names
+your remote sends.
 
 ## Configuration
 

@@ -69,11 +69,13 @@
 
 [keys]
 # Maps the keys your remote sends to its buttons: left, right, up, down, ok, back, or none to
-# unbind; settings opens the settings panel (holding OK does too). Key names are as `wev` shows them: arrows, Return, Escape, BackSpace, Tab, space,
-# Delete, Insert, Home, End, Page_Up, Page_Down, Menu, Pause, F1-F24 or a printable
-# character. Media keys and a dedicated Back key (XF86Back) never reach the app, so a remote's
-# Back button must send Escape or BackSpace. Entries here add to or replace the defaults.
+# unbind; settings opens the settings panel (holding OK does too). Key names are as `wev` shows
+# them: arrows, Return, Escape, BackSpace, Tab, space, Delete, Insert, Home, End, Page_Up,
+# Page_Down, Menu, Pause, F1-F24, a printable character, or the remote keys XF86Back,
+# XF86Forward and XF86HomePage. Media keys (XF86AudioPlay and the like) never reach the app.
+# Entries here add to or replace the defaults.
 # Menu = "settings"
+# XF86Back = "back"
 # Left = "left"
 # Right = "right"
 # Up = "up"

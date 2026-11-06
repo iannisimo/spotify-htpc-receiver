@@ -15,7 +15,7 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_ignored = "0.1.14"
 serde_json = "1.0.154"
-slint = { version = "=1.18.1", default-features = false, features = ["std", "backend-default", "renderer-femtovg", "renderer-software", "compat-1-2"] }
+slint = { version = "=1.18.1", default-features = false, features = ["std", "backend-default", "renderer-femtovg", "renderer-software", "compat-1-2", "unstable-winit-030"] }
 tokio = { version = "1.54.1", features = ["rt", "sync", "time", "net", "macros", "rt-multi-thread"] }
 tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect", "handshake"] }
 libloading = "0.8.9"

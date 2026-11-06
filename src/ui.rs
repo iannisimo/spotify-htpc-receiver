@@ -154,6 +154,7 @@ pub fn run_ui(cfg: Config) -> Result<(), Box<dyn Error>> {
         weak.upgrade()
             .is_some_and(|controller| controller.borrow_mut().key_up(&text))
     });
+    install_remote_keys(&app, &controller);
     let weak = Rc::downgrade(&controller);
     app.on_focus_lost(move || {
         if let Some(controller) = weak.upgrade() {
@@ -391,7 +392,13 @@ impl Controller {
     /// A key went down; returns false for keys that are not bound. OK is the exception to
     /// acting at once: a tap acts when released, and a hold opens the settings.
     fn key_down(&mut self, text: &str, repeat: bool) -> bool {
-        let Some(key) = key_name(text).and_then(|name| self.cfg.keys.get(&name)) else {
+        key_name(text).is_some_and(|name| self.key_down_named(&name, repeat))
+    }
+
+    /// `key_down` for a key known by its config name (keys Slint does not report, such as
+    /// XF86Back, arrive this way from the window's raw events).
+    fn key_down_named(&mut self, name: &str, repeat: bool) -> bool {
+        let Some(key) = self.cfg.keys.get(name) else {
             return false;
         };
         match key {
@@ -410,7 +417,11 @@ impl Controller {
 
     /// A key went up. Only OK cares.
     fn key_up(&mut self, text: &str) -> bool {
-        let Some(key) = key_name(text).and_then(|name| self.cfg.keys.get(&name)) else {
+        key_name(text).is_some_and(|name| self.key_up_named(&name))
+    }
+
+    fn key_up_named(&mut self, name: &str) -> bool {
+        let Some(key) = self.cfg.keys.get(name) else {
             return false;
         };
         if key == Key::Ok {
@@ -945,6 +956,54 @@ fn unix_now_ms() -> u64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
+/// Slint drops key events it has no text for, which includes the Back key many remotes send
+/// (`XF86Back`). This sees the window's raw winit events first and hands those keys to the
+/// controller by name. A no-op without the winit backend (as in the tests).
+fn install_remote_keys(app: &App, controller: &Rc<RefCell<Controller>>) {
+    use slint::winit_030::winit::event::{ElementState, WindowEvent};
+    use slint::winit_030::winit::keyboard::Key as WinitKey;
+    use slint::winit_030::{EventResult, WinitWindowAccessor};
+
+    let weak = Rc::downgrade(controller);
+    app.window().on_winit_window_event(move |_, event| {
+        // Synthetic events replay keys held when the window gains focus; Slint skips them too.
+        let WindowEvent::KeyboardInput {
+            event,
+            is_synthetic: false,
+            ..
+        } = event
+        else {
+            return EventResult::Propagate;
+        };
+        let WinitKey::Named(named) = &event.logical_key else {
+            return EventResult::Propagate;
+        };
+        let (Some(name), Some(controller)) = (remote_key_name(*named), weak.upgrade()) else {
+            return EventResult::Propagate;
+        };
+        let handled = match event.state {
+            ElementState::Pressed => controller.borrow_mut().key_down_named(name, event.repeat),
+            ElementState::Released => controller.borrow_mut().key_up_named(name),
+        };
+        if handled {
+            EventResult::PreventDefault
+        } else {
+            EventResult::Propagate
+        }
+    });
+}
+
+/// Config names (keysym names) of the remote keys Slint does not report.
+fn remote_key_name(key: slint::winit_030::winit::keyboard::NamedKey) -> Option<&'static str> {
+    use slint::winit_030::winit::keyboard::NamedKey;
+    match key {
+        NamedKey::BrowserBack => Some("XF86Back"),
+        NamedKey::BrowserForward => Some("XF86Forward"),
+        NamedKey::BrowserHome => Some("XF86HomePage"),
+        _ => None,
+    }
 }
 
 /// The key name for a Slint key event text, matching the names used in `[keys]` in the config
@@ -1794,6 +1853,35 @@ mod tests {
         let h = harness();
         h.apply([PlayerEvent::Connected, PlayerEvent::Disconnected]);
         assert!(h.jobs.borrow().is_empty());
+    }
+
+    #[test]
+    fn remote_back_key_works_like_escape() {
+        // XF86Back arrives by name from the raw window events (no winit window in tests).
+        let h = harness();
+        h.playing(track("A"));
+        open_settings(&h);
+        assert!(h.controller.borrow_mut().key_down_named("XF86Back", false));
+        assert!(h.controller.borrow_mut().key_up_named("XF86Back"));
+        assert!(!h.exists("App::settings-panel"));
+        assert!(
+            !h.controller
+                .borrow_mut()
+                .key_down_named("XF86Forward", false),
+            "not bound by default"
+        );
+    }
+
+    #[test]
+    fn remote_key_names() {
+        use slint::winit_030::winit::keyboard::NamedKey;
+        assert_eq!(remote_key_name(NamedKey::BrowserBack), Some("XF86Back"));
+        assert_eq!(
+            remote_key_name(NamedKey::BrowserForward),
+            Some("XF86Forward")
+        );
+        assert_eq!(remote_key_name(NamedKey::BrowserHome), Some("XF86HomePage"));
+        assert_eq!(remote_key_name(NamedKey::MediaPlayPause), None);
     }
 
     #[test]

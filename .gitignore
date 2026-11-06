@@ -1,1 +1,6 @@
 /target
+# makepkg output
+/packaging/arch/src/
+/packaging/arch/pkg/
+/packaging/arch/htpc-nowplaying/
+/packaging/arch/*.pkg.tar.*

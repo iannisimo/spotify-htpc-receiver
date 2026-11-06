@@ -173,10 +173,10 @@ pub struct VisualizerConfig {
 }
 
 /// Maps physical key names (keysym names as shown by `wev`, e.g. `Return`, `Escape`, `a`) to
-/// remote buttons. Only keys the UI toolkit reports can be used: arrows, Return (also the keypad
-/// Enter), Escape, BackSpace, Tab, space, Delete, Insert, Home, End, Page_Up, Page_Down, Menu,
-/// Pause, F1–F24 and printable characters. Media keys and a dedicated Back key (`XF86Back`) are
-/// not delivered, so a remote's Back button must send Escape or BackSpace.
+/// remote buttons. Usable keys: arrows, Return (also the keypad Enter), Escape, BackSpace, Tab,
+/// space, Delete, Insert, Home, End, Page_Up, Page_Down, Menu, Pause, F1–F24, printable
+/// characters, and the remote keys XF86Back, XF86Forward and XF86HomePage. Media keys
+/// (XF86AudioPlay and the like) are not delivered.
 #[derive(Debug, Clone, PartialEq)]
 pub struct KeyMap(HashMap<String, Key>);
 
@@ -196,6 +196,7 @@ impl Default for KeyMap {
             ("Return", Key::Ok),
             ("Escape", Key::Back),
             ("BackSpace", Key::Back),
+            ("XF86Back", Key::Back),
             ("Menu", Key::Settings),
         ];
         KeyMap(
@@ -727,9 +728,9 @@ mod tests {
             })
             .map(|line| format!("{line}\n"))
             .collect();
-        // 3 top-level, 4 daemon, 12 visualizer, 8 default keys: a new setting belongs here too.
+        // 3 top-level, 4 daemon, 12 visualizer, 9 default keys: a new setting belongs here too.
         let settings = uncommented.lines().filter(|l| l.contains(" = ")).count();
-        assert_eq!(settings, 27);
+        assert_eq!(settings, 28);
 
         let (mut cfg, warnings) = parse_with_home(&uncommented, Some(Path::new("/home/me")));
         assert!(warnings.is_empty(), "{warnings:?}");
@@ -817,6 +818,11 @@ mod tests {
     #[test]
     fn settings_key_defaults_to_menu() {
         assert_eq!(KeyMap::default().get("Menu"), Some(Key::Settings));
+    }
+
+    #[test]
+    fn remote_back_key_defaults_to_back() {
+        assert_eq!(KeyMap::default().get("XF86Back"), Some(Key::Back));
     }
 
     #[test]
