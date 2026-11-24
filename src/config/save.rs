@@ -14,6 +14,7 @@ pub enum Setting {
     Shuffle(bool),
     DelayMs(u32),
     Pairing(PairingMode),
+    PresetSet(u8),
 }
 
 #[derive(Debug)]
@@ -58,6 +59,7 @@ pub fn save_setting(path: &Path, setting: Setting) -> Result<(), SaveError> {
         Setting::Shuffle(on) => ("visualizer", "shuffle", Value::from(on)),
         Setting::DelayMs(ms) => ("visualizer", "delay_ms", Value::from(i64::from(ms))),
         Setting::Pairing(mode) => ("daemon", "pairing", Value::from(mode.as_str())),
+        Setting::PresetSet(set) => ("visualizer", "preset_set", Value::from(i64::from(set))),
     };
 
     let table = doc
@@ -188,6 +190,16 @@ mod tests {
         assert_eq!(cfg.daemon.pairing, PairingMode::On);
         assert_eq!(cfg.daemon.address, "127.0.0.1:9191");
         assert_eq!(cfg.daemon.device_name.as_deref(), Some("Den"));
+    }
+
+    #[test]
+    fn save_preset_set() {
+        let dir = temp_dir("preset-set");
+        let path = dir.join("config.toml");
+        save_setting(&path, Setting::PresetSet(4)).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("preset_set = 4"), "{text}");
+        assert_eq!(load(&path).visualizer.preset_set, 4);
     }
 
     #[test]

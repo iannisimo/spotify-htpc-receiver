@@ -15,7 +15,7 @@ use tokio::sync::mpsc;
 
 use crate::calibrate::Calibration;
 use crate::config::{
-    Config, PairingMode, Setting, default_path, disabled_presets_path, save_setting,
+    Config, PRESET_SETS, PairingMode, Setting, default_path, disabled_presets_path, save_setting,
 };
 use crate::cover::{CoverCache, DecodedImage};
 use crate::input::{Action, Focus, HOLD, Key, OkGesture, OkHold, Screen, UiState, handle_key};
@@ -25,7 +25,7 @@ use crate::player;
 use crate::settings::{Effect, Panel, PanelView, Row, Values};
 use crate::soloist;
 use crate::visualizer::{LiveAudio, Session, View};
-use crate::viz::disabled::DisabledPresets;
+use crate::viz::disabled::{self, DisabledPresets};
 use crate::viz::tree::{Check, PresetTree};
 use crate::viz::{self, GlContext, Visualizer, VizError};
 
@@ -44,6 +44,7 @@ const TREE_WINDOW: usize = 15;
 #[derive(Debug, Clone)]
 pub struct Paths {
     pub config: PathBuf,
+    /// The list of preset set 1; the other sets sit next to it (see [`disabled::set_path`]).
     pub disabled: PathBuf,
 }
 
@@ -279,7 +280,7 @@ struct Controller {
     time_skew: Duration,
     /// The settings as last shown or changed in the panel.
     settings: Values,
-    /// The presets switched off, as last saved.
+    /// The presets switched off in the current preset set, as last saved.
     disabled: DisabledPresets,
     pairing: Pairing,
     /// The settings panel, while it is open.
@@ -315,13 +316,15 @@ impl Controller {
         load_cover: CoverLoader,
         background: Background,
     ) -> Rc<RefCell<Controller>> {
-        let disabled = DisabledPresets::load(&paths.disabled);
+        let set = cfg.visualizer.preset_set;
+        let disabled = DisabledPresets::load(&disabled::set_path(&paths.disabled, set));
         let settings = Values {
             pairing: cfg.daemon.pairing,
             beat_sensitivity: cfg.visualizer.beat_sensitivity,
             preset_duration_s: cfg.visualizer.preset_duration_s,
             shuffle: cfg.visualizer.shuffle,
             delay_ms: cfg.visualizer.delay_ms,
+            preset_set: set,
         };
         Rc::new_cyclic(|me| {
             RefCell::new(Controller {
@@ -549,6 +552,12 @@ impl Controller {
                         calibration.set_delay(ms);
                     }
                 }
+                Effect::PresetSet(set) => {
+                    self.save(Setting::PresetSet(set));
+                    let disabled = DisabledPresets::load(&self.disabled_path());
+                    self.disabled = disabled.clone();
+                    self.viz.borrow_mut().set_disabled(disabled);
+                }
                 Effect::StartCalibration => self.start_calibration(),
                 Effect::StopCalibration => self.stop_calibration(),
                 Effect::OpenPresets => self.open_presets(),
@@ -622,15 +631,21 @@ impl Controller {
             return;
         };
         let disabled = tree.to_disabled(&self.disabled);
-        match disabled.save(&self.paths.disabled) {
+        let path = self.disabled_path();
+        match disabled.save(&path) {
             Ok(()) => self.save_error = None,
             Err(e) => {
-                log::warn!("cannot save {}: {e}", self.paths.disabled.display());
+                log::warn!("cannot save {}: {e}", path.display());
                 self.save_error = Some(format!("Not saved: {e}"));
             }
         }
         self.disabled = disabled.clone();
         self.viz.borrow_mut().set_disabled(disabled);
+    }
+
+    /// The file of the preset set in use.
+    fn disabled_path(&self) -> PathBuf {
+        disabled::set_path(&self.paths.disabled, self.settings.preset_set)
     }
 
     /// Shows one preset in the visualizer, opening it first if it is closed.
@@ -701,6 +716,7 @@ impl Controller {
                     Row::PresetDuration => format!("{:.0} s", v.preset_duration_s),
                     Row::Shuffle => on_off(v.shuffle),
                     Row::VisualDelay => format!("{} ms", v.delay_ms),
+                    Row::PresetSet => format!("{} of {PRESET_SETS}", v.preset_set),
                     Row::Calibrate | Row::Presets => "›".to_owned(),
                 };
                 let label = |row: Row| match row {
@@ -710,6 +726,7 @@ impl Controller {
                     Row::Shuffle => "Shuffle",
                     Row::VisualDelay => "Visual delay",
                     Row::Calibrate => "Calibrate delay",
+                    Row::PresetSet => "Preset set",
                     Row::Presets => "Presets",
                 };
                 let rows: Vec<SettingsRow> = Row::ALL
@@ -777,10 +794,11 @@ impl Controller {
         let Some(tree) = self.panel.as_ref().and_then(Panel::tree) else {
             return "Looking for presets…".to_owned();
         };
+        let set = self.settings.preset_set;
         match tree.counts() {
             (0, _) => "No presets".to_owned(),
-            (total, 0) => format!("{total} presets"),
-            (total, off) => format!("{total} presets, {off} off"),
+            (total, 0) => format!("Set {set}: {total} presets"),
+            (total, off) => format!("Set {set}: {total} presets, {off} off"),
         }
     }
 
@@ -1159,9 +1177,12 @@ mod tests {
                 .collect()
         }
 
-        /// Moves down the settings list to `label`.
+        /// Moves the panel's focus to the row `label`, from the first row down.
         fn go_to(&self, label: &str) {
-            for _ in 0..8 {
+            for _ in 0..Row::ALL.len() {
+                self.press(Key::UpArrow);
+            }
+            for _ in 0..=Row::ALL.len() {
                 if self.settings_rows().iter().any(|r| r.2 && r.0 == label) {
                     return;
                 }
@@ -1738,6 +1759,7 @@ mod tests {
                 ("Shuffle", "On"),
                 ("Visual delay", "0 ms"),
                 ("Calibrate delay", "›"),
+                ("Preset set", "1 of 5"),
                 ("Presets", "›"),
             ]
         );
@@ -1917,7 +1939,7 @@ mod tests {
                 .collect()
         };
         assert_eq!(labels(&h), ["/ (3)", "A (2)", "top"]);
-        assert_eq!(h.app.get_tree_summary(), "3 presets");
+        assert_eq!(h.app.get_tree_summary(), "Set 1: 3 presets");
 
         h.press(Key::RightArrow); // expand A
         assert_eq!(labels(&h), ["/ (3)", "A (2)", "a1", "b1", "top"]);
@@ -1927,7 +1949,7 @@ mod tests {
             std::fs::read_to_string(h.dir.join("disabled-presets.txt")).unwrap(),
             "A/a1.milk\n"
         );
-        assert_eq!(h.app.get_tree_summary(), "3 presets, 1 off");
+        assert_eq!(h.app.get_tree_summary(), "Set 1: 3 presets, 1 off");
         assert_eq!(labels(&h)[..2], ["/ (3, 1 off)", "A (2, 1 off)"]);
         assert!(
             h.controller
@@ -1943,13 +1965,13 @@ mod tests {
         h.press(Key::UpArrow);
         h.press(Key::UpArrow);
         h.press(Key::Return);
-        assert_eq!(h.app.get_tree_summary(), "3 presets, 3 off");
+        assert_eq!(h.app.get_tree_summary(), "Set 1: 3 presets, 3 off");
         assert_eq!(
             std::fs::read_to_string(h.dir.join("disabled-presets.txt")).unwrap(),
             "A/\ntop.milk\n"
         );
         h.press(Key::Return);
-        assert_eq!(h.app.get_tree_summary(), "3 presets");
+        assert_eq!(h.app.get_tree_summary(), "Set 1: 3 presets");
         assert_eq!(
             std::fs::read_to_string(h.dir.join("disabled-presets.txt")).unwrap(),
             ""
@@ -1957,6 +1979,62 @@ mod tests {
 
         h.press(Key::Escape);
         assert_eq!(h.app.get_settings_view(), 0);
+    }
+
+    #[test]
+    fn preset_sets_keep_their_own_lists() {
+        let (cfg, _dir) = config_with_presets(&["a.milk", "b.milk"]);
+        let h = Harness::new(cfg);
+        let viz_disabled = |h: &Harness| -> Vec<String> {
+            let c = h.controller.borrow();
+            let viz = c.viz.borrow();
+            viz.disabled().entries().map(str::to_owned).collect()
+        };
+        let toggle_first_preset = |h: &Harness| {
+            h.go_to("Presets");
+            h.press(Key::Return); // the cursor starts on the first preset, below `/`
+            h.press(Key::Return);
+            h.press(Key::Escape);
+        };
+        open_settings(&h);
+        toggle_first_preset(&h); // set 1: a off
+
+        h.go_to("Preset set");
+        h.press(Key::RightArrow);
+        assert!(
+            std::fs::read_to_string(h.dir.join("config.toml"))
+                .unwrap()
+                .contains("preset_set = 2")
+        );
+        assert!(
+            viz_disabled(&h).is_empty(),
+            "set 2 starts with everything on"
+        );
+        h.press(Key::DownArrow);
+        h.press(Key::Return);
+        assert_eq!(h.app.get_tree_summary(), "Set 2: 2 presets");
+        h.press(Key::DownArrow);
+        h.press(Key::Return);
+        h.press(Key::Escape); // set 2: b off
+        assert_eq!(
+            std::fs::read_to_string(h.dir.join("disabled-presets-2.txt")).unwrap(),
+            "b.milk\n"
+        );
+        assert_eq!(viz_disabled(&h), ["b.milk"]);
+        assert_eq!(
+            std::fs::read_to_string(h.dir.join("disabled-presets.txt")).unwrap(),
+            "a.milk\n",
+            "set 1 untouched"
+        );
+
+        h.go_to("Preset set");
+        h.press(Key::LeftArrow);
+        assert_eq!(viz_disabled(&h), ["a.milk"], "back to set 1");
+        assert!(
+            h.settings_rows()
+                .iter()
+                .any(|r| r.0 == "Preset set" && r.1 == "1 of 5")
+        );
     }
 
     #[test]

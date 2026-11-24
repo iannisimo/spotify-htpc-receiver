@@ -67,6 +67,11 @@
 # TVs over HDMI and Bluetooth speakers often need 100-300. Measure it, or tune by eye.
 # delay_ms = 0
 
+# Which of the 5 preset sets is in use (1-5). Each set keeps its own list of switched-off
+# presets: set 1 in disabled-presets.txt next to this file, set 2 in disabled-presets-2.txt,
+# and so on. The settings panel switches sets and edits the one in use.
+# preset_set = 1
+
 [keys]
 # Maps the keys your remote sends to its buttons: left, right, up, down, ok, back, or none to
 # unbind; settings opens the settings panel (holding OK does too). Key names are as `wev` shows

@@ -3,10 +3,27 @@
 //! One path per line, relative to the preset folder; a trailing `/` disables a whole folder.
 //! Lines that name nothing in the current collection are ignored when loading but kept when
 //! saving, so swapping preset collections back and forth loses nothing.
+//!
+//! The user can keep several such lists (preset sets) and switch between them: set 1 is
+//! `disabled-presets.txt`, set 2 `disabled-presets-2.txt`, and so on.
 
 use std::collections::BTreeSet;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// The file of preset set `set`, given the file of set 1: set 1 is `first` itself, set `n` the
+/// same name with `-n` before the extension.
+pub fn set_path(first: &Path, set: u8) -> PathBuf {
+    if set <= 1 {
+        return first.to_owned();
+    }
+    let stem = first.file_stem().unwrap_or_default().to_string_lossy();
+    let name = match first.extension() {
+        Some(ext) => format!("{stem}-{set}.{}", ext.to_string_lossy()),
+        None => format!("{stem}-{set}"),
+    };
+    first.with_file_name(name)
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DisabledPresets {
@@ -109,6 +126,14 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "A/\nb.milk\n");
         assert_eq!(DisabledPresets::load(&path), d);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn set_paths() {
+        let first = Path::new("/c/disabled-presets.txt");
+        assert_eq!(set_path(first, 1), first);
+        assert_eq!(set_path(first, 2), Path::new("/c/disabled-presets-2.txt"));
+        assert_eq!(set_path(Path::new("/c/list"), 5), Path::new("/c/list-5"));
     }
 
     #[test]

@@ -18,6 +18,9 @@ pub use save::{SaveError, Setting, save_setting};
 /// Longest speaker name Spotify's device list takes comfortably.
 const NAME_MAX: usize = 32;
 
+/// How many sets of switched-off presets the user can keep and switch between.
+pub const PRESET_SETS: u8 = 5;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     /// Ask the compositor for a fullscreen window. Some ignore the request by policy (for
@@ -170,6 +173,8 @@ pub struct VisualizerConfig {
     pub beat_sensitivity: f32,
     /// Delay applied to captured audio so visuals line up with what is heard.
     pub delay_ms: u32,
+    /// The set of switched-off presets in use (1–[`PRESET_SETS`]).
+    pub preset_set: u8,
 }
 
 /// Maps physical key names (keysym names as shown by `wev`, e.g. `Return`, `Escape`, `a`) to
@@ -233,6 +238,7 @@ impl Default for Config {
                 min_fps: 30,
                 beat_sensitivity: 1.0,
                 delay_ms: 0,
+                preset_set: 1,
             },
             keys: KeyMap::default(),
         }
@@ -337,6 +343,7 @@ struct RawVisualizer {
     min_fps: i64,
     beat_sensitivity: f64,
     delay_ms: i64,
+    preset_set: i64,
 }
 
 impl Default for RawConfig {
@@ -366,6 +373,7 @@ impl Default for RawConfig {
                 min_fps: v.min_fps.into(),
                 beat_sensitivity: v.beat_sensitivity.into(),
                 delay_ms: v.delay_ms.into(),
+                preset_set: v.preset_set.into(),
             },
             keys: BTreeMap::new(),
         }
@@ -430,6 +438,13 @@ fn validate(raw: RawConfig, home: Option<&Path>, w: &mut Vec<String>) -> Config 
             dv.beat_sensitivity.into(),
         ) as f32,
         delay_ms: clamp_int(w, "visualizer.delay_ms", rv.delay_ms, 0, 2000),
+        preset_set: clamp_int(
+            w,
+            "visualizer.preset_set",
+            rv.preset_set,
+            1,
+            PRESET_SETS.into(),
+        ),
     };
 
     let address = if is_host_port(&raw.daemon.address) {
@@ -583,6 +598,7 @@ mod tests {
         assert_eq!(viz.fps_cap, 60);
         assert!(viz.min_fps <= viz.fps_cap);
         assert_eq!(viz.beat_sensitivity, 1.0);
+        assert_eq!(viz.preset_set, 1);
     }
 
     #[test]
@@ -606,6 +622,7 @@ mod tests {
             min_fps: 15,
             beat_sensitivity: 2.5,
             delay_ms: 120,
+            preset_set: 3,
         };
         assert_eq!(cfg.visualizer, expected);
     }
@@ -660,9 +677,10 @@ mod tests {
         assert_eq!(viz.min_fps, 10, "min_fps is capped by the clamped fps_cap");
         assert_eq!(viz.beat_sensitivity, 0.0);
         assert_eq!(viz.delay_ms, 2000);
+        assert_eq!(viz.preset_set, 5);
         assert_eq!(
             warnings.len(),
-            11,
+            12,
             "one warning per bad value: {warnings:?}"
         );
     }
@@ -728,9 +746,9 @@ mod tests {
             })
             .map(|line| format!("{line}\n"))
             .collect();
-        // 3 top-level, 4 daemon, 12 visualizer, 9 default keys: a new setting belongs here too.
+        // 3 top-level, 4 daemon, 13 visualizer, 9 default keys: a new setting belongs here too.
         let settings = uncommented.lines().filter(|l| l.contains(" = ")).count();
-        assert_eq!(settings, 28);
+        assert_eq!(settings, 29);
 
         let (mut cfg, warnings) = parse_with_home(&uncommented, Some(Path::new("/home/me")));
         assert!(warnings.is_empty(), "{warnings:?}");

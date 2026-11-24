@@ -219,7 +219,8 @@ with the visualizer running behind the panel.
 | Shuffle | Random or alphabetical preset order |
 | Visual delay | 0–2000 ms, in steps of 10 |
 | Calibrate delay | Flashes the screen on each beat of the music: change the delay until the flash matches what you hear. Needs music playing. |
-| Presets | The preset folder as a tree with check boxes. OK switches a preset or a whole folder on or off (kept in `disabled-presets.txt` next to `config.toml`); **Right** on a preset shows it in the visualizer, even a switched-off one, and pauses automatic switching until you leave the tree. |
+| Preset set | Which of 5 saved selections of presets is in use (◀ ▶). Each set remembers its own switched-off presets; a set you have not used yet has every preset on. |
+| Presets | The preset folder as a tree with check boxes, for the preset set in use. OK switches a preset or a whole folder on or off (set 1 is kept in `disabled-presets.txt` next to `config.toml`, set 2 in `disabled-presets-2.txt`, and so on); **Right** on a preset shows it in the visualizer, even a switched-off one, and pauses automatic switching until you leave the tree. |
 
 A broken `config.toml` is never overwritten: the panel says "Not saved" and the change lasts
 until the app closes.

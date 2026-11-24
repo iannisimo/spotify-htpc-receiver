@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use crate::config::PairingMode;
+use crate::config::{PRESET_SETS, PairingMode};
 use crate::input::Key;
 use crate::viz::tree::PresetTree;
 
@@ -26,17 +26,19 @@ pub enum Row {
     Shuffle,
     VisualDelay,
     Calibrate,
+    PresetSet,
     Presets,
 }
 
 impl Row {
-    pub const ALL: [Row; 7] = [
+    pub const ALL: [Row; 8] = [
         Row::Pairing,
         Row::BeatSensitivity,
         Row::PresetDuration,
         Row::Shuffle,
         Row::VisualDelay,
         Row::Calibrate,
+        Row::PresetSet,
         Row::Presets,
     ];
 
@@ -54,6 +56,8 @@ pub struct Values {
     pub preset_duration_s: f64,
     pub shuffle: bool,
     pub delay_ms: u32,
+    /// The preset set in use, 1–[`PRESET_SETS`]; the Presets view edits it.
+    pub preset_set: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,6 +77,8 @@ pub enum Effect {
     PresetDuration(f64),
     Shuffle(bool),
     Delay(u32),
+    /// Switch to this preset set: save the choice and apply its list.
+    PresetSet(u8),
     StartCalibration,
     StopCalibration,
     /// The Presets view opened: scan the folder and call [`Panel::set_tree`].
@@ -169,6 +175,18 @@ impl Panel {
                 vec![Effect::PresetDuration(value)]
             }
             Row::VisualDelay => self.step_delay(up),
+            Row::PresetSet => {
+                let value = if up {
+                    v.preset_set.saturating_add(1).min(PRESET_SETS)
+                } else {
+                    v.preset_set.saturating_sub(1).max(1)
+                };
+                if value == v.preset_set {
+                    return vec![];
+                }
+                v.preset_set = value;
+                vec![Effect::PresetSet(value)]
+            }
             Row::Calibrate | Row::Presets => vec![],
         }
     }
@@ -211,7 +229,9 @@ impl Panel {
                 self.tree = None;
                 vec![Effect::OpenPresets]
             }
-            Row::BeatSensitivity | Row::PresetDuration | Row::VisualDelay => vec![],
+            Row::BeatSensitivity | Row::PresetDuration | Row::VisualDelay | Row::PresetSet => {
+                vec![]
+            }
         }
     }
 
@@ -294,6 +314,7 @@ mod tests {
             preset_duration_s: 30.0,
             shuffle: true,
             delay_ms: 45,
+            preset_set: 1,
         }
     }
 
@@ -417,9 +438,27 @@ mod tests {
 
     #[test]
     fn ok_on_value_rows_does_nothing() {
-        for row in [Row::BeatSensitivity, Row::PresetDuration, Row::VisualDelay] {
+        for row in [
+            Row::BeatSensitivity,
+            Row::PresetDuration,
+            Row::VisualDelay,
+            Row::PresetSet,
+        ] {
             assert_eq!(panel_on(row).key(Key::Ok), [], "{row:?}");
         }
+    }
+
+    #[test]
+    fn preset_set_steps_between_1_and_5() {
+        let mut p = panel_on(Row::PresetSet);
+        assert_eq!(p.key(Key::Left), [], "already the first set");
+        assert_eq!(p.key(Key::Right), [Effect::PresetSet(2)]);
+        for _ in 0..10 {
+            p.key(Key::Right);
+        }
+        assert_eq!(p.values().preset_set, 5);
+        assert_eq!(p.key(Key::Right), [], "already the last set");
+        assert_eq!(p.key(Key::Left), [Effect::PresetSet(4)]);
     }
 
     #[test]

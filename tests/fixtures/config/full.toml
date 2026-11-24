@@ -18,3 +18,4 @@ min_scale = 0.25
 min_fps = 15
 beat_sensitivity = 2.5
 delay_ms = 120
+preset_set = 3
