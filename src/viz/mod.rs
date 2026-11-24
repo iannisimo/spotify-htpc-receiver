@@ -293,6 +293,7 @@ impl Visualizer {
             self.set_window((width, height));
             unsafe { (self.api.projectm_opengl_render_frame)(self.handle) };
         }
+        self.gl.force_opaque();
         self.gl.restore(&saved);
         self.after_call();
         if let Some(hard_cut) = self.events.switch_requested.take()

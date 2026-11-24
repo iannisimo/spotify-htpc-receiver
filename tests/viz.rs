@@ -90,6 +90,7 @@ const EGL_RENDERABLE_TYPE: i32 = 0x3040;
 const EGL_OPENGL_ES3_BIT: i32 = 0x40;
 const EGL_SURFACE_TYPE: i32 = 0x3033;
 const EGL_PBUFFER_BIT: i32 = 0x0001;
+const EGL_ALPHA_SIZE: i32 = 0x3021;
 const EGL_WIDTH: i32 = 0x3057;
 const EGL_HEIGHT: i32 = 0x3056;
 const EGL_NONE: i32 = 0x3038;
@@ -97,6 +98,8 @@ const EGL_OPENGL_ES_API: u32 = 0x30A0;
 const EGL_CONTEXT_MAJOR_VERSION: i32 = 0x3098;
 
 const GL_FRAMEBUFFER_BINDING: u32 = 0x8CA6;
+const GL_READ_FRAMEBUFFER: u32 = 0x8CA8;
+const GL_READ_FRAMEBUFFER_BINDING: u32 = 0x8CAA;
 const GL_RGBA: u32 = 0x1908;
 const GL_UNSIGNED_BYTE: u32 = 0x1401;
 const GL_VIEWPORT: u32 = 0x0BA2;
@@ -152,6 +155,8 @@ impl Egl {
             EGL_OPENGL_ES3_BIT,
             EGL_SURFACE_TYPE,
             EGL_PBUFFER_BIT,
+            EGL_ALPHA_SIZE,
+            8,
             EGL_NONE,
         ];
         let (mut config, mut n) = (none, 0);
@@ -238,6 +243,28 @@ impl TestGl<'_> {
         );
         let (pixels, _) = px.as_chunks::<4>();
         pixels.iter().filter(|p| p[..3] != [0, 0, 0]).count()
+    }
+
+    /// Pixels of framebuffer 0 (`size`² pixels) whose alpha is not fully opaque.
+    fn see_through_pixels(&self, size: i32) -> usize {
+        let read: extern "system" fn(i32, i32, i32, i32, u32, u32, *mut c_void) =
+            self.f(c"glReadPixels");
+        let bind: extern "system" fn(u32, u32) = self.f(c"glBindFramebuffer");
+        let [was] = self.integers::<1>(GL_READ_FRAMEBUFFER_BINDING);
+        bind(GL_READ_FRAMEBUFFER, 0);
+        let mut px = vec![0u8; (size * size * 4) as usize];
+        read(
+            0,
+            0,
+            size,
+            size,
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            px.as_mut_ptr().cast(),
+        );
+        bind(GL_READ_FRAMEBUFFER, was as u32);
+        let (pixels, _) = px.as_chunks::<4>();
+        pixels.iter().filter(|p| p[3] != 255).count()
     }
 }
 
@@ -394,6 +421,65 @@ fn demo_disabled_preset_then_resume() {
         "on",
         "a failed demo keeps what was showing"
     );
+    drop(viz);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Translucent waves and border, as in many real presets: projectM blends them into the alpha
+/// channel too, leaving pixels with alpha below 1.
+const TRANSLUCENT_PRESET: &str = "[preset00]
+fDecay=0.98
+ob_size=0.05
+ob_r=1.0
+ob_a=0.3
+ib_size=0.05
+ib_g=1.0
+ib_a=0.3
+wave_r=1.0
+wave_g=1.0
+wave_b=1.0
+fWaveAlpha=0.3
+nWaveMode=0
+bWaveThick=1
+fWaveScale=1.5
+";
+
+/// The window is transparent to the compositor, so any alpha below 1 lets the desktop show
+/// through the visualizer.
+#[test]
+#[ignore = "needs libprojectM-4 and an EGL/GLES 3 driver"]
+fn leaves_the_window_opaque() {
+    const SIZE: i32 = 128;
+    let dir = temp_dir("opaque");
+    std::fs::write(dir.join("translucent.milk"), TRANSLUCENT_PRESET).unwrap();
+    let egl = Egl::new(SIZE);
+    let gl = TestGl { egl: &egl };
+    // SAFETY: the EGL context is current on this thread for the whole test.
+    let ctx = unsafe { GlContext::current(&|name| egl.proc_address(name)) };
+    let mut viz =
+        Visualizer::new(ctx, &config(&dir), &DisabledPresets::default()).expect("visualizer");
+    for (frames, scale) in [(0..30, 1.0), (30..60, 0.5)] {
+        let quality = Quality {
+            scale,
+            mesh_w: 16,
+            mesh_h: 12,
+            fps_cap: 60,
+        };
+        for frame in frames {
+            viz.feed_pcm(&sine(frame));
+            viz.render(SIZE as u32, SIZE as u32, quality);
+        }
+        assert_eq!(gl.error(), 0);
+        assert!(
+            gl.lit_pixels(0, 0, SIZE, SIZE) > 100,
+            "nothing drawn at {scale}"
+        );
+        assert_eq!(
+            gl.see_through_pixels(SIZE),
+            0,
+            "see-through pixels at {scale}"
+        );
+    }
     drop(viz);
     std::fs::remove_dir_all(dir).unwrap();
 }

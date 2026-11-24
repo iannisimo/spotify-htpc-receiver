@@ -19,6 +19,9 @@ const NEAREST: Enum = 0x2600;
 /// The window's own framebuffer. projectM 4.1 always draws into it, whatever is bound.
 const WINDOW_FRAMEBUFFER: u32 = 0;
 const VIEWPORT: Enum = 0x0BA2;
+const SCISSOR_TEST: Enum = 0x0C11;
+const COLOR_CLEAR_VALUE: Enum = 0x0C22;
+const COLOR_WRITEMASK: Enum = 0x0C23;
 
 macro_rules! gl_fns {
     ($($field:ident = $name:literal: fn($($arg:ty),*) $(-> $ret:ty)?;)*) => {
@@ -57,6 +60,14 @@ gl_fns! {
     renderbuffer_storage = c"glRenderbufferStorage": fn(Enum, Enum, i32, i32);
     framebuffer_renderbuffer = c"glFramebufferRenderbuffer": fn(Enum, Enum, Enum, u32);
     blit_framebuffer = c"glBlitFramebuffer": fn(i32, i32, i32, i32, i32, i32, i32, i32, u32, Enum);
+    get_floatv = c"glGetFloatv": fn(Enum, *mut f32);
+    get_booleanv = c"glGetBooleanv": fn(Enum, *mut u8);
+    is_enabled = c"glIsEnabled": fn(Enum) -> u8;
+    enable = c"glEnable": fn(Enum);
+    disable = c"glDisable": fn(Enum);
+    color_mask = c"glColorMask": fn(u8, u8, u8, u8);
+    clear_color = c"glClearColor": fn(f32, f32, f32, f32);
+    clear = c"glClear": fn(u32);
 }
 
 /// Framebuffer bindings and viewport at the start of a frame, put back at its end so the UI
@@ -89,6 +100,34 @@ impl Gl {
         (self.bind_framebuffer)(READ_FRAMEBUFFER, saved.read);
         let [x, y, w, h] = saved.viewport;
         (self.viewport)(x, y, w, h);
+    }
+
+    /// Sets the alpha of every pixel of the window's framebuffer to 1, leaving the colours alone.
+    /// Many presets leave alpha below 1, MilkDrop never showed it, but the window is
+    /// transparent to the compositor (Slint's winit backend asks for that on Linux), so the
+    /// desktop would show through. Puts back the state it touches.
+    pub fn force_opaque(&self) {
+        let mut mask = [0u8; 4];
+        (self.get_booleanv)(COLOR_WRITEMASK, mask.as_mut_ptr());
+        let mut clear = [0f32; 4];
+        (self.get_floatv)(COLOR_CLEAR_VALUE, clear.as_mut_ptr());
+        let scissor = (self.is_enabled)(SCISSOR_TEST) != 0;
+
+        (self.bind_framebuffer)(DRAW_FRAMEBUFFER, WINDOW_FRAMEBUFFER);
+        if scissor {
+            (self.disable)(SCISSOR_TEST);
+        }
+        (self.color_mask)(0, 0, 0, 1);
+        (self.clear_color)(0.0, 0.0, 0.0, 1.0);
+        (self.clear)(COLOR_BUFFER_BIT);
+
+        let [r, g, b, a] = mask;
+        (self.color_mask)(r, g, b, a);
+        let [r, g, b, a] = clear;
+        (self.clear_color)(r, g, b, a);
+        if scissor {
+            (self.enable)(SCISSOR_TEST);
+        }
     }
 
     /// Stretches the `via.width`×`via.height` corner projectM just drew into framebuffer 0
